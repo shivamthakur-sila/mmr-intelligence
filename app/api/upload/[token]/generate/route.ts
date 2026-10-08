@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { resolveToken, TokenError } from "@/lib/resolve-token";
+import { assertOwnUpload, resolveToken, TokenError } from "@/lib/resolve-token";
 import { loadChecklist } from "@/lib/checklist";
-import { curateDeck } from "@/lib/curate";
+import { curateDeck, sanitisePhotos } from "@/lib/curate";
 import { generateDeck } from "@/lib/generate-deck";
-import { sectionSlides } from "@/lib/deck-layout";
-import { loadSession, addUserImages, materializeImages, saveDeck } from "@/lib/session";
+import { deckOutline } from "@/lib/deck-layout";
+import { openSession, addUserImages, materializeImages, saveDeck } from "@/lib/session";
 import { extractXlsx } from "@/lib/parsing/xlsx";
 import { createServiceClient } from "@/lib/supabase/service";
 import { BUCKET } from "../signed-urls/route";
@@ -26,6 +26,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
 
     const typedAnswers = body.answers ?? [];
 
+    // Before anything is read or written: the session must belong to this
+    // link. The id comes from the request body, and every query here runs
+    // with the service-role client.
+    await openSession(sessionId, resolved);
+
     // Gap attachments come from storage too, same reasoning as the
     // review step: a photo set can easily exceed Vercel's body limit.
     const storage = createServiceClient();
@@ -33,7 +38,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     const userPhotos: { name: string; buffer: Buffer }[] = [];
 
     for (const f of body.attachments ?? []) {
-      const { data, error } = await storage.storage.from(BUCKET).download(f.path);
+      const own = assertOwnUpload(f.path, resolved);
+      const { data, error } = await storage.storage.from(BUCKET).download(own);
       if (error || !data) continue; // a missing attachment shouldn't sink the whole build
       const buffer = Buffer.from(await data.arrayBuffer());
       if (/\.xlsx$/i.test(f.name)) {
@@ -44,7 +50,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     }
     if (userPhotos.length > 0) await addUserImages(sessionId, userPhotos);
 
-    const session = await loadSession(sessionId);
+    // Re-read: addUserImages may just have added the site team's photos.
+    const session = await openSession(sessionId, resolved);
     // Pull the session's photos down into this invocation's /tmp so the
     // deck builder can embed them from real file paths.
     const sessionDir = await materializeImages(sessionId, session.images);
@@ -56,7 +63,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
         ? session.images.map((i) => `- ${i.id}: from "${i.slideTitle || "site team upload"}"`).join("\n")
         : "(no photography available)";
 
-    const deck = await curateDeck(
+    const curated = await curateDeck(
       combined,
       manifest,
       checklist,
@@ -64,6 +71,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       resolved.reportMonth,
       typedAnswers
     );
+    // Only photographs that exist reach the renderer and the preview alike.
+    const deck = sanitisePhotos(curated, session.images.map((i) => i.id));
 
     const buf = await generateDeck(deck, sessionDir, session.images, resolved.siteName, resolved.reportMonth);
 
@@ -73,11 +82,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
 
     return NextResponse.json({
       deck,
-      // Counted the way the deck is actually built, not one per section:
-      // a section whose blocks overrun the content area is continued onto
-      // further slides, so sections and slides are no longer the same
-      // number. The cover and the at-a-glance slide are the +2.
-      slideCount: 2 + deck.sections.reduce((n, s) => n + sectionSlides(s).length, 0),
+      // Counted from the same outline the deck is built to and the preview
+      // draws, so the number the submitter sees is the number filed. Adding
+      // up sections - and then sections plus two - each went stale as the
+      // deck gained continuation, contents and closing slides.
+      slideCount: deckOutline(deck.sections).length,
       sizeKb: Math.round(buf.length / 1024),
     });
   } catch (err) {

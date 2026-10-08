@@ -25,15 +25,12 @@ function Notice({ title, body }: { title: string; body?: string }) {
 export default async function UploadTokenPage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
 
+  // Only the token check sits in the try. JSX built inside a try/catch is
+  // rendered later, outside it, so a render error was never caught there
+  // anyway - the catch only ever handled resolveToken failing.
+  let resolved;
   try {
-    const resolved = await resolveToken(token);
-    return (
-      <Validator
-        token={token}
-        siteName={resolved.siteName}
-        reportMonth={resolved.reportMonth}
-      />
-    );
+    resolved = await resolveToken(token);
   } catch (err) {
     if (err instanceof TokenError) {
       return <Notice title={err.message} />;
@@ -45,4 +42,6 @@ export default async function UploadTokenPage({ params }: { params: Promise<{ to
       />
     );
   }
+
+  return <Validator token={token} siteName={resolved.siteName} reportMonth={resolved.reportMonth} />;
 }

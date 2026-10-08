@@ -62,3 +62,22 @@ export async function resolveToken(token: string): Promise<ResolvedToken> {
     reportMonth: row.report_month,
   };
 }
+
+/**
+ * Refuses a storage path unless it is one this token's upload step issued.
+ *
+ * signed-urls issues paths of the form {siteId}/{reportMonth}/{batch}/{name},
+ * and the review and generate routes download whatever path the browser
+ * posts back - with the service-role client, so nothing in Storage stops
+ * them. Without this check, one valid link could pull another site's files
+ * into its own deck.
+ */
+export function assertOwnUpload(storagePath: unknown, resolved: ResolvedToken): string {
+  const p = String(storagePath ?? "");
+  const prefix = `${resolved.siteId}/${resolved.reportMonth}/`;
+  const segments = p.split("/");
+  if (!p.startsWith(prefix) || segments.some((s) => s === ".." || s === "." || s === "")) {
+    throw new TokenError("A file in this request doesn't belong to this link.", 403);
+  }
+  return p;
+}

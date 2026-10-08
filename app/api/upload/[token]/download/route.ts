@@ -10,7 +10,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
     const sessionId = new URL(req.url).searchParams.get("session");
     if (!sessionId) return NextResponse.json({ error: "Missing session id." }, { status: 400 });
 
-    const buf = await loadDeck(sessionId);
+    const buf = await loadDeck(sessionId, resolved);
     const name = `MMR_${resolved.siteName.replace(/\s+/g, "_")}_${resolved.reportMonth}.pptx`;
 
     return new NextResponse(new Uint8Array(buf), {

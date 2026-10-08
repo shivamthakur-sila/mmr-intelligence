@@ -15,7 +15,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     if (!sessionId) return NextResponse.json({ error: "Missing session id." }, { status: 400 });
 
     const supabase = createServiceClient();
-    const buf = await loadDeck(sessionId);
+    const buf = await loadDeck(sessionId, resolved);
     const submissionId = crypto.randomUUID();
     const storagePath = `${resolved.siteId}/${resolved.reportMonth}/MMR_${resolved.reportMonth}.pptx`;
 
@@ -53,6 +53,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       .update({ is_latest: false })
       .eq("site_id", resolved.siteId)
       .eq("report_month", resolved.reportMonth)
+      // Final decks only. The registry also holds the source files and
+      // other formats for the month, each with its own is_latest, and those
+      // are not superseded by a new deck.
+      .eq("format_role", "final_deck")
       .eq("is_latest", true);
     if (supersedeError) {
       return NextResponse.json(
@@ -106,6 +110,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       .from("upload_tokens")
       .update({ used_at: new Date().toISOString() })
       .eq("token", token);
+    if (burnError) {
+      // The submitter is told too, but the browser is not a log: this is
+      // the record an operator would actually look for.
+      console.error("[commit] filed, but token burn failed", {
+        siteId: resolved.siteId,
+        reportMonth: resolved.reportMonth,
+        error: burnError.message,
+      });
+    }
 
     return NextResponse.json({
       filed: true,

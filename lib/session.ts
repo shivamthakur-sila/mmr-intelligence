@@ -3,6 +3,7 @@ import path from "path";
 import os from "os";
 import crypto from "crypto";
 import { createServiceClient } from "./supabase/service";
+import { TokenError } from "./resolve-token";
 import type { ExtractedImage } from "./parsing/images";
 
 export const SESSION_BUCKET = "mmr-uploads";
@@ -21,6 +22,8 @@ export const SESSION_BUCKET = "mmr-uploads";
 export type ImageRecord = { id: string; file: string; slideNumber: number; slideTitle: string };
 
 export type SessionData = {
+  /** The site this session belongs to. Every later step checks it against the token. */
+  siteId: string;
   combinedText: string;
   imageManifest: string;
   images: ImageRecord[];
@@ -32,7 +35,11 @@ export function newSessionId(): string {
   return crypto.randomBytes(8).toString("hex");
 }
 
+/** Exactly what newSessionId issues. Anything else could steer keyFor elsewhere in the bucket. */
+const SESSION_ID = /^[0-9a-f]{16}$/;
+
 function keyFor(id: string, name: string) {
+  if (!SESSION_ID.test(id)) throw new TokenError("That session id isn't valid.", 400);
   return `sessions/${id}/${name}`;
 }
 
@@ -84,6 +91,27 @@ export async function loadSession(id: string): Promise<SessionData> {
     throw new Error("That session has expired or wasn't found. Start again from the upload step.");
   }
   return JSON.parse(await data.text()) as SessionData;
+}
+
+/**
+ * Loads a session and refuses it unless it belongs to the caller's token.
+ *
+ * The upload routes run with the service-role client and so trust nothing the
+ * browser sends. A session id came straight from the request body and was
+ * used as given: anyone holding one valid link could name another site's
+ * session and have its photographs built into their deck, or file that
+ * site's built deck as their own month. Every route that touches a session
+ * now goes through here first.
+ */
+export async function openSession(
+  id: string,
+  scope: { siteId: string; reportMonth: string }
+): Promise<SessionData> {
+  const session = await loadSession(id);
+  if (session.siteId !== scope.siteId || session.reportMonth !== scope.reportMonth) {
+    throw new TokenError("That session doesn't belong to this link.", 403);
+  }
+  return session;
 }
 
 /**
@@ -162,7 +190,17 @@ export async function saveDeck(id: string, deck: Buffer): Promise<void> {
   if (error) throw new Error(`Couldn't store the generated deck: ${error.message}`);
 }
 
-export async function loadDeck(id: string): Promise<Buffer> {
+/**
+ * The built deck, for the session this token owns. Takes the scope rather than
+ * leaving the check to each caller: commit files whatever this returns as the
+ * token's site and month, so a missed check there would file another site's
+ * deck.
+ */
+export async function loadDeck(
+  id: string,
+  scope: { siteId: string; reportMonth: string }
+): Promise<Buffer> {
+  await openSession(id, scope);
   const supabase = createServiceClient();
   const { data, error } = await supabase.storage
     .from(SESSION_BUCKET)

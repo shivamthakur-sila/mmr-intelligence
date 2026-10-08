@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { resolveToken, TokenError } from "@/lib/resolve-token";
+import { assertOwnUpload, resolveToken, TokenError } from "@/lib/resolve-token";
 import { extractAllFiles } from "@/lib/extract-all";
 import { loadChecklist } from "@/lib/checklist";
 import { validateSiteMonth, reviewSubmission } from "@/lib/curate";
@@ -27,7 +27,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     const supabaseStorage = createServiceClient();
     const buffers: { buffer: Buffer; name: string }[] = [];
     for (const f of files) {
-      const { data, error } = await supabaseStorage.storage.from(BUCKET).download(f.path);
+      const own = assertOwnUpload(f.path, resolved);
+      const { data, error } = await supabaseStorage.storage.from(BUCKET).download(own);
       if (error || !data) {
         return NextResponse.json(
           { error: `Couldn't read back "${f.name}" from storage: ${error?.message ?? "not found"}` },
@@ -66,7 +67,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     const sessionId = newSessionId();
     await saveSession(
       sessionId,
-      { combinedText, imageManifest, siteName: resolved.siteName, reportMonth: resolved.reportMonth },
+      {
+        siteId: resolved.siteId,
+        combinedText,
+        imageManifest,
+        siteName: resolved.siteName,
+        reportMonth: resolved.reportMonth,
+      },
       images
     );
 

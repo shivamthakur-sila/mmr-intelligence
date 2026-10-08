@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import DeckPreview from "./deck-preview";
 import type { CuratedDeck } from "@/lib/curate";
-import { uploadViaStorage, type UploadedRef } from "@/lib/upload-via-storage";
+import { uploadViaStorage } from "@/lib/upload-via-storage";
 
 type Section = {
   key: string;
@@ -37,7 +37,12 @@ export default function Validator({
   const [error, setError] = useState("");
   const [rejection, setRejection] = useState<{ reason: string; evidence: string } | null>(null);
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
-  const [uploaded, setUploaded] = useState<UploadedRef[]>([]);
+  // Set when the slides name this month but the dated figures underneath are
+  // from another period. The submitter decides, not the system: refusing a
+  // whole submission over one stale embedded sheet is too harsh, and carrying
+  // on silently is how last year's figures reach a client under this month.
+  const [periodConflict, setPeriodConflict] = useState<string | null>(null);
+  const [periodConfirmed, setPeriodConfirmed] = useState(false);
 
   const [sessionId, setSessionId] = useState("");
   const [sections, setSections] = useState<Section[]>([]);
@@ -51,6 +56,7 @@ export default function Validator({
   const [deck, setDeck] = useState<CuratedDeck | null>(null);
   const [slideCount, setSlideCount] = useState(0);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
+  const [tokenWarning, setTokenWarning] = useState<string | null>(null);
 
   useEffect(() => {
     if (step !== "review" || sections.length === 0 || revealed >= sections.length) return;
@@ -76,7 +82,6 @@ export default function Validator({
       const refs = await uploadViaStorage(token, files, (done, total) =>
         setUploadProgress({ done, total })
       );
-      setUploaded(refs);
       setUploadProgress(null);
 
       const res = await fetch(`/api/upload/${token}/review`, {
@@ -98,6 +103,8 @@ export default function Validator({
       }
 
       setSessionId(data.sessionId);
+      setPeriodConflict(data.validation?.verdict === "period_conflict" ? data.validation.evidence : null);
+      setPeriodConfirmed(false);
       setSections(data.sections);
       setPhotoCount(data.photoCount);
       setRevealed(0);
@@ -162,6 +169,7 @@ export default function Validator({
         return;
       }
       setStorageWarning(data.storageWarning ?? null);
+      setTokenWarning(data.tokenWarning ?? null);
       setStep("filed");
     } catch {
       setError("Couldn't reach the server.");
@@ -429,6 +437,30 @@ export default function Validator({
                     they&apos;re left out.
                   </p>
                 )}
+                {periodConflict && (
+                  <div
+                    className="mt-6 rounded-lg px-4 py-3 text-[13.5px] leading-relaxed"
+                    style={{ border: "1px solid var(--sun)", background: "var(--paper)" }}
+                  >
+                    <p className="font-medium">Some figures may be from a different period</p>
+                    <p className="mt-1" style={{ color: "var(--muted)" }}>
+                      {periodConflict}
+                    </p>
+                    <p className="mt-2" style={{ color: "var(--muted)" }}>
+                      If a workbook was carried over from an earlier report, upload the current one
+                      instead. If these figures are right, confirm below — each one will be shown
+                      against the period its own row gives, never relabelled as {reportMonth}.
+                    </p>
+                    <label className="mt-3 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={periodConfirmed}
+                        onChange={(e) => setPeriodConfirmed(e.target.checked)}
+                      />
+                      These figures are correct as submitted
+                    </label>
+                  </div>
+                )}
                 {busy ? (
                   <Working
                     label="Curating the content and building the deck…"
@@ -437,7 +469,8 @@ export default function Validator({
                 ) : (
                   <button
                     onClick={runGenerate}
-                    className="mt-6 w-full rounded-lg py-3 text-[15px] font-medium text-white"
+                    disabled={!!periodConflict && !periodConfirmed}
+                    className="mt-6 w-full rounded-lg py-3 text-[15px] font-medium text-white disabled:opacity-40"
                     style={{ background: "var(--sun)" }}
                   >
                     Build the deck
@@ -453,8 +486,34 @@ export default function Validator({
             <h1 className="text-[29px] leading-tight">Check it over</h1>
             <p className="mt-3 text-[15px] leading-relaxed" style={{ color: "var(--muted)" }}>
               {slideCount} slides, built from {deck.sections.length} sections that had real content.
-              Nothing here was invented — every figure comes from what you submitted.
+              Every figure was checked against what you submitted.
             </p>
+
+            {(() => {
+              const removed = (deck.grounding ?? []).filter((g) => g.action === "dropped");
+              if (removed.length === 0) return null;
+              return (
+                <details
+                  className="mt-5 rounded-lg px-4 py-3 text-[13.5px] leading-relaxed"
+                  style={{ background: "var(--wash)" }}
+                >
+                  <summary className="cursor-pointer">
+                    {removed.length} {removed.length === 1 ? "item was" : "items were"} left out because
+                    {removed.length === 1 ? " its figures aren't" : " their figures aren't"} in your files
+                  </summary>
+                  <ul className="mt-2 space-y-1" style={{ color: "var(--muted)" }}>
+                    {removed.map((g, n) => (
+                      <li key={n}>
+                        {g.where}: {g.value.length > 140 ? g.value.slice(0, 139) + "…" : g.value}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-2" style={{ color: "var(--muted)" }}>
+                    If a figure should be there, go back and add it as an answer to the gap.
+                  </p>
+                </details>
+              );
+            })()}
 
             <div className="mt-8">
               <DeckPreview deck={deck} siteName={siteName} reportMonth={reportMonth} />
@@ -504,13 +563,16 @@ export default function Validator({
               </p>
             )}
 
-            <a
-              href={`/api/upload/${token}/download?session=${sessionId}`}
-              className="mt-8 block w-full rounded-lg py-3 text-center text-[15px] font-medium text-white"
-              style={{ background: "var(--blue)" }}
-            >
-              Download a copy
-            </a>
+            {tokenWarning && (
+              <p className="mt-4 rounded-lg px-4 py-3 text-[13px] leading-relaxed" style={{ background: "var(--wash)", color: "var(--muted)" }}>
+                {tokenWarning}. Your submission is filed; this link will still refuse a second one.
+              </p>
+            )}
+
+            {/* No download here. Once a month is filed this link is closed -
+                resolveToken refuses it, by design, for every route including
+                download - so a button here could only ever return an error.
+                A copy can be taken with "Download to review" before filing. */}
           </section>
         )}
       </div>
