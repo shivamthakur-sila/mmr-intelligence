@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import type { CuratedDeck, Block } from "@/lib/curate";
-import { sectionSlides, type Row } from "@/lib/deck-layout";
+import { deckOutline, type OutlineSlide, type Row } from "@/lib/deck-layout";
+import { chartPalette, decimalsNeeded, formatNumber, niceAxis } from "@/lib/chart-style";
 
 /**
  * Renders the curated spec as HTML slides at 16:9, mirroring the pptx
@@ -20,17 +21,13 @@ export default function DeckPreview({
   siteName: string;
   reportMonth: string;
 }) {
-  // Sections are split here exactly as the .pptx splits them, using the same
-  // measurements, so the slide the submitter approves is the slide that gets
-  // filed — including the continuation slides a long section spills onto.
-  const slides = [
-    { kind: "cover" as const },
-    { kind: "glance" as const },
-    ...deck.sections.flatMap((s) =>
-      sectionSlides(s).map((page) => ({ kind: "section" as const, page }))
-    ),
-  ];
-  const [i, setI] = useState(0);
+  // The same outline the .pptx is built to and the generate route counts, so
+  // the deck the submitter approves is the deck that gets filed - contents and
+  // closing slides, and every continuation slide a long section spills onto.
+  const slides: OutlineSlide[] = deckOutline(deck.sections);
+  const [index, setI] = useState(0);
+  // Clamped: a regenerated deck can be shorter than the slide being viewed.
+  const i = Math.min(index, slides.length - 1);
   const current = slides[i];
 
   return (
@@ -41,7 +38,9 @@ export default function DeckPreview({
       >
         {current.kind === "cover" && <CoverSlide siteName={siteName} reportMonth={reportMonth} />}
         {current.kind === "glance" && <GlanceSlide summary={deck.summary} />}
-        {current.kind === "section" && <SectionSlide page={current.page} />}
+        {current.kind === "contents" && <ContentsSlide labels={current.labels} reportMonth={reportMonth} />}
+        {current.kind === "section" && <SectionSlide page={current} />}
+        {current.kind === "closing" && <ClosingSlide />}
       </div>
 
       <div className="mt-3 flex items-center justify-between">
@@ -71,7 +70,7 @@ export default function DeckPreview({
           <button
             key={n}
             onClick={() => setI(n)}
-            title={s.kind === "section" ? s.page.label : s.kind === "cover" ? "Cover" : "At a glance"}
+            title={slideTitle(s)}
             className="h-1.5 rounded-full transition-all"
             style={{
               width: n === i ? 22 : 10,
@@ -154,6 +153,66 @@ function GlanceSlide({ summary }: { summary: CuratedDeck["summary"] }) {
   );
 }
 
+function slideTitle(s: OutlineSlide): string {
+  switch (s.kind) {
+    case "cover": return "Cover";
+    case "glance": return "At a glance";
+    case "contents": return "Contents";
+    case "closing": return "Thank you";
+    case "section": return s.label;
+  }
+}
+
+/** Mirrors the contents slide in generate-deck.ts: one column, two past eight. */
+function ContentsSlide({ labels, reportMonth }: { labels: string[]; reportMonth: string }) {
+  const cols = labels.length > 8 ? 2 : 1;
+  const perCol = Math.ceil(labels.length / cols);
+  const columns = Array.from({ length: cols }, (_, c) => labels.slice(c * perCol, (c + 1) * perCol));
+  return (
+    <Chrome title={`Contents — ${reportMonth}`}>
+      <div className="flex gap-[5%]">
+        {columns.map((col, c) => (
+          <ul key={c} className="flex-1 space-y-[3%]">
+            {col.map((label, n) => (
+              <li key={n} className="flex items-center gap-[4%]" style={{ fontSize: "clamp(6.5px, 1.05vw, 12px)" }}>
+                <span style={{ width: 4, height: "1.1em", background: "var(--sun)", flexShrink: 0 }} />
+                {label}
+              </li>
+            ))}
+          </ul>
+        ))}
+      </div>
+    </Chrome>
+  );
+}
+
+/** Mirrors the closing slide: photograph (shown here as a panel), orange band, blue footer. */
+function ClosingSlide() {
+  return (
+    <div className="absolute inset-0 flex flex-col">
+      <div style={{ height: "8.6%", background: "var(--blue)" }} />
+      <div className="relative min-h-0 flex-1">
+        <div className="absolute inset-y-0 left-[6%] right-[6%]" style={{ background: "#9a9a9a" }}>
+          <p className="p-[2%] text-[11px]" style={{ color: "#eee" }}>
+            The cover photograph, in black and white
+          </p>
+        </div>
+        <div
+          className="absolute left-0 flex items-center"
+          style={{ top: "38%", width: "55%", height: "26%", background: "var(--sun)", paddingLeft: "6%" }}
+        >
+          <p style={{ fontFamily: "var(--serif)", fontSize: "clamp(12px, 2.8vw, 30px)", letterSpacing: "0.12em" }}>
+            THANK YOU
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center" style={{ height: "12%", width: "46%", background: "var(--blue)", paddingLeft: "6%" }}>
+        <p style={{ color: "#fff", fontSize: "clamp(7px, 1vw, 11px)" }}>www.silagroup.co.in</p>
+      </div>
+    </div>
+  );
+}
+
 function SectionSlide({ page }: { page: { label: string; rows: Row[] } }) {
   return (
     <Chrome title={page.label}>
@@ -190,8 +249,12 @@ function BlockView({ block }: { block: Block }) {
     return (
       <div className="flex gap-[1.5%]">
         {block.items.slice(0, 4).map((k, n) => (
-          <div key={n} className="flex-1 px-[2%] py-[1.5%]" style={{ background: "var(--wash)", borderLeft: "3px solid var(--sun)" }}>
-            <p style={{ fontFamily: "var(--serif)", color: "var(--blue)", fontSize: "clamp(10px, 1.7vw, 17px)" }}>
+          <div
+            key={n}
+            className="flex-1 px-[2%] py-[1.5%]"
+            style={{ background: "#fff", border: "1px solid var(--hairline)", borderLeft: "4px solid var(--sun)" }}
+          >
+            <p style={{ fontFamily: "var(--serif)", color: "var(--blue)", fontSize: "clamp(12px, 2.3vw, 24px)" }}>
               {k.value}
             </p>
             <p style={{ fontSize: "clamp(5.5px, 0.8vw, 8.5px)", color: "var(--muted)", letterSpacing: "0.08em" }}>
@@ -232,7 +295,7 @@ function BlockView({ block }: { block: Block }) {
         <thead>
           <tr>
             {block.headers.map((h, n) => (
-              <th key={n} style={{ ...cell, background: "var(--sun)", color: "#fff", textAlign: "left", fontWeight: 600 }}>
+              <th key={n} style={{ ...cell, background: "var(--blue)", color: "#fff", textAlign: "left", fontWeight: 600 }}>
                 {h}
               </th>
             ))}
@@ -250,9 +313,9 @@ function BlockView({ block }: { block: Block }) {
   if (block.type === "photos") {
     return (
       <div className="grid gap-[1.5%]" style={{ gridTemplateColumns: `repeat(${Math.min(3, block.imageIds.length)}, 1fr)` }}>
-        {block.imageIds.slice(0, 6).map((id) => (
+        {block.imageIds.slice(0, 6).map((_, n) => (
           <div
-            key={id}
+            key={n}
             className="flex items-center justify-center"
             style={{ background: "var(--wash)", aspectRatio: "4 / 3", fontSize: "clamp(5.5px, 0.8vw, 9px)", color: "var(--muted)" }}
           >
@@ -277,7 +340,10 @@ function BlockView({ block }: { block: Block }) {
 
   if (block.type === "note") {
     return (
-      <p className="italic" style={{ fontSize: "clamp(5.5px, 0.82vw, 9px)", color: "var(--muted)" }}>
+      <p
+        className="px-[1.4%] py-[0.8%]"
+        style={{ fontSize: "clamp(5.5px, 0.85vw, 10px)", border: "1px dashed var(--sun)" }}
+      >
         {block.text}
       </p>
     );
@@ -292,71 +358,56 @@ function BlockView({ block }: { block: Block }) {
 // Charts
 //
 // Drawn as plain SVG rather than with a charting library: the preview only
-// has to show the same figures, in the same shape and the same brand
-// colours, as the chart the .pptx will contain. It mirrors the renderer's
-// decisions deliberately - uniform colour for a single series, a zero
-// baseline on bars, horizontal layout for long category labels - so that
-// what the submitter approves here is what gets filed.
+// has to show the same figures, in the same shape and the same colours, as
+// the chart the .pptx will contain. Colours, number formats and axis ranges
+// come from lib/chart-style, the module the renderer uses, so the two cannot
+// drift again. Layout choices are mirrored by hand: uniform colour for a
+// single series, a zero baseline on bars, horizontal bars for long labels.
+//
+// Elements are keyed by position, never by category or series names: those
+// come from the model and can repeat, and a duplicate key makes React drop or
+// reuse the wrong element.
 // ---------------------------------------------------------------------
 
-const CHART_BASES = ["#264170", "#F7A328"];
-
-function tintHex(hex: string, amount: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  const mix = (c: number) => Math.round(c + (255 - c) * amount);
-  return (
-    "#" +
-    [mix((n >> 16) & 255), mix((n >> 8) & 255), mix(n & 255)]
-      .map((v) => v.toString(16).padStart(2, "0"))
-      .join("")
-  );
-}
-
-/** Mirrors chartPalette() in lib/generate-deck.ts. */
-function chartPalette(count: number): string[] {
-  return Array.from({ length: Math.max(1, count) }, (_, i) =>
-    tintHex(CHART_BASES[i % CHART_BASES.length], Math.min(0.62, Math.floor(i / CHART_BASES.length) * 0.21))
-  );
-}
-
-const fmt = (n: number) => n.toLocaleString("en-IN");
-
+const hex = (c: string) => `#${c}`;
 const trim = (s: string, max: number) => (s.length > max ? s.slice(0, max - 1) + "…" : s);
 
 function ChartView({ block }: { block: Extract<Block, { type: "chart" }> }) {
   const { chartType, categories, series } = block;
+  const dp = decimalsNeeded(series.flatMap((s) => s.values));
   const legend =
     chartType === "pie"
-      ? categories.map((c, i) => ({ label: c, color: chartPalette(categories.length)[i] }))
+      ? categories.map((c, i) => ({ label: c, color: hex(chartPalette(categories.length)[i]) }))
       : series.length > 1
-        ? series.map((s, i) => ({ label: s.name, color: chartPalette(series.length)[i] }))
+        ? series.map((s, i) => ({ label: s.name, color: hex(chartPalette(series.length)[i]) }))
         : [];
 
   // Grows into the space the other blocks leave, but never below roughly the
-  // share the renderer guarantees it (1.5in of a 5.07in content area). Without
-  // a floor the flex column squeezed a chart sitting above a ten-row table
-  // down to a few unreadable pixels.
+  // share the renderer guarantees it (1.5in of a 5.07in content area).
   return (
     <div className="flex min-h-0 flex-1 flex-col" style={{ minHeight: "30%" }}>
-      {block.title && (
+      {(block.title || block.unit) && (
         <p className="mb-[1%]" style={{ fontFamily: "var(--serif)", fontSize: "clamp(6.5px, 1vw, 11px)" }}>
-          {block.title}
+          {block.title ?? ""}
+          {block.unit ? (
+            <span style={{ color: "var(--muted)" }}>{block.title ? ` (${block.unit})` : block.unit}</span>
+          ) : null}
         </p>
       )}
       <div className="min-h-0 flex-1">
         {chartType === "pie" ? (
-          <PieChart categories={categories} values={series[0]?.values ?? []} />
+          <PieChart categories={categories} values={series[0]?.values ?? []} dp={dp} />
         ) : chartType === "line" ? (
           <LineChart categories={categories} series={series} />
         ) : (
-          <BarChart categories={categories} series={series} />
+          <BarChart categories={categories} series={series} dp={dp} />
         )}
       </div>
       {legend.length > 0 && (
         <div className="mt-[1%] flex flex-wrap justify-center gap-x-[3%] gap-y-[0.5%]">
-          {legend.map((l) => (
+          {legend.map((l, n) => (
             <span
-              key={l.label}
+              key={n}
               className="flex items-center gap-1"
               style={{ fontSize: "clamp(5px, 0.75vw, 8.5px)", color: "var(--muted)" }}
             >
@@ -366,11 +417,6 @@ function ChartView({ block }: { block: Extract<Block, { type: "chart" }> }) {
           ))}
         </div>
       )}
-      {block.unit && (
-        <p className="mt-[0.5%] text-right" style={{ fontSize: "clamp(4.5px, 0.7vw, 8px)", color: "var(--muted)" }}>
-          {block.unit}
-        </p>
-      )}
     </div>
   );
 }
@@ -378,35 +424,41 @@ function ChartView({ block }: { block: Extract<Block, { type: "chart" }> }) {
 function BarChart({
   categories,
   series,
+  dp,
 }: {
   categories: string[];
   series: { name: string; values: number[] }[];
+  dp: number;
 }) {
+  if (categories.length === 0 || series.length === 0) return null;
   const longest = Math.max(...categories.map((c) => c.length));
   const horizontal = series.length === 1 && (longest > 14 || categories.length > 8);
-  // A single series is one colour; more than one gets a colour each. The
-  // .pptx renderer makes the same choice, for a harder reason - see the
-  // chartPalette comment in lib/generate-deck.ts.
-  const colors = series.length === 1 ? [CHART_BASES[0]] : chartPalette(series.length);
-
-  // Bars encode value as length, so the scale starts at zero.
-  const max = Math.max(0, ...series.flatMap((s) => s.values)) || 1;
+  // One colour for a single series; one per series otherwise - as the deck.
+  const colors = series.length === 1 ? [hex(chartPalette(1)[0])] : chartPalette(series.length).map(hex);
+  // The renderer's axis: it includes zero and reaches below it for negative
+  // values, so a negative bar extends the other way instead of vanishing.
+  const axis = niceAxis(series.flatMap((s) => s.values), { includeZero: true, pad: 0.1 });
+  const span = axis.max - axis.min || 1;
 
   if (horizontal) {
     const rowH = 100 / categories.length;
+    const plotX = 96;
+    const plotW = 205;
+    const at = (v: number) => plotX + ((v - axis.min) / span) * plotW;
     return (
       <svg viewBox="0 0 320 100" preserveAspectRatio="xMidYMid meet" className="h-full w-full">
         {categories.map((c, i) => {
           const v = series[0].values[i];
-          const w = (v / max) * 205;
+          const x0 = at(Math.min(0, v));
+          const x1 = at(Math.max(0, v));
           return (
-            <g key={c}>
-              <text x={92} y={i * rowH + rowH / 2} textAnchor="end" dominantBaseline="middle" fontSize={5} fill="#697784">
+            <g key={i}>
+              <text x={plotX - 4} y={i * rowH + rowH / 2} textAnchor="end" dominantBaseline="middle" fontSize={5} fill="#697784">
                 {trim(c, 22)}
               </text>
-              <rect x={96} y={i * rowH + rowH * 0.22} width={Math.max(0.5, w)} height={rowH * 0.56} fill={colors[0]} />
-              <text x={96 + w + 3} y={i * rowH + rowH / 2} dominantBaseline="middle" fontSize={5} fill="#2D2D2D">
-                {fmt(v)}
+              <rect x={x0} y={i * rowH + rowH * 0.22} width={Math.max(0.5, x1 - x0)} height={rowH * 0.56} fill={colors[0]} />
+              <text x={x1 + 3} y={i * rowH + rowH / 2} dominantBaseline="middle" fontSize={5} fill="#2D2D2D">
+                {formatNumber(v, dp)}
               </text>
             </g>
           );
@@ -415,24 +467,36 @@ function BarChart({
     );
   }
 
+  const top = 14;
+  const bottom = 88;
+  const at = (v: number) => bottom - ((v - axis.min) / span) * (bottom - top);
+  const zero = at(0);
   const colW = 300 / categories.length;
   return (
     <svg viewBox="0 0 320 100" preserveAspectRatio="xMidYMid meet" className="h-full w-full">
-      <line x1={18} y1={88} x2={318} y2={88} stroke="#E5E5E4" strokeWidth={0.5} />
+      <line x1={18} y1={zero} x2={318} y2={zero} stroke="#C9CDD2" strokeWidth={0.5} />
       {categories.map((c, i) => {
         const groupX = 18 + i * colW;
         const barW = (colW * 0.62) / series.length;
         const offset = (colW - barW * series.length) / 2;
         return (
-          <g key={c}>
+          <g key={i}>
             {series.map((s, si) => {
-              const h = (s.values[i] / max) * 72;
+              const v = s.values[i];
+              const y0 = Math.min(at(v), zero);
+              const h = Math.abs(at(v) - zero);
               const x = groupX + offset + si * barW;
               return (
-                <g key={s.name}>
-                  <rect x={x} y={88 - h} width={Math.max(0.5, barW * 0.88)} height={Math.max(0.3, h)} fill={colors[si]} />
-                  <text x={x + (barW * 0.88) / 2} y={88 - h - 2} textAnchor="middle" fontSize={4.5} fill="#2D2D2D">
-                    {fmt(s.values[i])}
+                <g key={si}>
+                  <rect x={x} y={y0} width={Math.max(0.5, barW * 0.88)} height={Math.max(0.3, h)} fill={colors[si]} />
+                  <text
+                    x={x + (barW * 0.88) / 2}
+                    y={v >= 0 ? y0 - 2 : y0 + h + 5}
+                    textAnchor="middle"
+                    fontSize={4.5}
+                    fill="#2D2D2D"
+                  >
+                    {formatNumber(v, dp)}
                   </text>
                 </g>
               );
@@ -454,23 +518,20 @@ function LineChart({
   categories: string[];
   series: { name: string; values: number[] }[];
 }) {
-  const colors = chartPalette(series.length);
-  const all = series.flatMap((s) => s.values);
-  // A line encodes value by position, so unlike bars it need not start at
-  // zero - the renderer leaves this axis automatic for the same reason.
-  const lo = Math.min(...all);
-  const hi = Math.max(...all);
-  const pad = (hi - lo) * 0.15 || Math.abs(hi) * 0.1 || 1;
-  const min = lo - pad;
-  const span = hi + pad - min || 1;
+  if (categories.length === 0 || series.length === 0) return null;
+  const colors = chartPalette(series.length).map(hex);
+  // The renderer's padded range - a line encodes value by position, so it
+  // need not start at zero.
+  const axis = niceAxis(series.flatMap((s) => s.values));
+  const span = axis.max - axis.min || 1;
   const x = (i: number) => 22 + (i * 292) / Math.max(1, categories.length - 1);
-  const y = (v: number) => 82 - ((v - min) / span) * 72;
+  const y = (v: number) => 82 - ((v - axis.min) / span) * 72;
 
   return (
     <svg viewBox="0 0 320 100" preserveAspectRatio="xMidYMid meet" className="h-full w-full">
       <line x1={18} y1={82} x2={318} y2={82} stroke="#E5E5E4" strokeWidth={0.5} />
       {series.map((s, si) => (
-        <g key={s.name}>
+        <g key={si}>
           <polyline
             points={s.values.map((v, i) => `${x(i)},${y(v)}`).join(" ")}
             fill="none"
@@ -483,7 +544,7 @@ function LineChart({
         </g>
       ))}
       {categories.map((c, i) => (
-        <text key={c} x={x(i)} y={92} textAnchor="middle" fontSize={5} fill="#697784">
+        <text key={i} x={x(i)} y={92} textAnchor="middle" fontSize={5} fill="#697784">
           {trim(c, 10)}
         </text>
       ))}
@@ -491,49 +552,54 @@ function LineChart({
   );
 }
 
-function PieChart({ categories, values }: { categories: string[]; values: number[] }) {
-  const colors = chartPalette(categories.length);
-  const total = values.reduce((a, b) => a + b, 0) || 1;
+function PieChart({ categories, values, dp }: { categories: string[]; values: number[]; dp: number }) {
+  const colors = chartPalette(categories.length).map(hex);
+  const positive = values.map((v) => (Number.isFinite(v) && v > 0 ? v : 0));
+  const total = positive.reduce((a, b) => a + b, 0);
   const cx = 50;
   const cy = 50;
+  const r = 31;
+  if (total <= 0) return null;
 
   // Each slice's start angle, accumulated up front rather than carried in a
-  // variable across the map below - reassigning one during render is exactly
-  // what react-hooks/immutability forbids.
+  // variable across the map below - reassigning one during render is what
+  // react-hooks/immutability forbids.
   const starts: number[] = [];
-  values.reduce((acc, v) => {
+  positive.reduce((acc, v) => {
     starts.push(acc);
     return acc + (v / total) * Math.PI * 2;
   }, -Math.PI / 2);
 
-  // A filled pie with labels outside, matching what the .pptx renders and
-  // for the same reason: no single label colour stays readable against both
-  // the dark and the pale ends of the palette, so the labels sit on white.
   const arc = (a0: number, a1: number) => {
-    const pt = (r: number, a: number) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
+    const pt = (a: number) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
     const large = a1 - a0 > Math.PI ? 1 : 0;
-    return `M${cx} ${cy} L${pt(31, a0)} A31 31 0 ${large} 1 ${pt(31, a1)} Z`;
+    return `M${cx} ${cy} L${pt(a0)} A${r} ${r} 0 ${large} 1 ${pt(a1)} Z`;
   };
 
   return (
     <svg viewBox="0 0 100 100" className="h-full w-full">
-      {values.map((v, i) => {
+      {positive.map((v, i) => {
+        // Zero slices draw nothing. A slice that is the whole pie must be a
+        // circle: an arc from an angle back to the same angle has no extent,
+        // so a single 100% category used to leave the pie blank.
+        if (v <= 0) return null;
+        const whole = v / total >= 0.9999;
         const a0 = starts[i];
         const a1 = a0 + (v / total) * Math.PI * 2;
         const mid = (a0 + a1) / 2;
         return (
-          <g key={categories[i]}>
-            <path d={arc(a0, a1)} fill={colors[i]} />
+          <g key={i}>
+            {whole ? <circle cx={cx} cy={cy} r={r} fill={colors[i]} /> : <path d={arc(a0, a1)} fill={colors[i]} />}
             {v / total > 0.03 && (
               <text
-                x={cx + 36 * Math.cos(mid)}
-                y={cy + 36 * Math.sin(mid)}
+                x={whole ? cx : cx + 36 * Math.cos(mid)}
+                y={whole ? cy - r - 4 : cy + 36 * Math.sin(mid)}
                 textAnchor="middle"
                 dominantBaseline="middle"
                 fontSize={4.5}
                 fill="#2D2D2D"
               >
-                {fmt(v)}
+                {formatNumber(values[i], dp)}
               </text>
             )}
           </g>

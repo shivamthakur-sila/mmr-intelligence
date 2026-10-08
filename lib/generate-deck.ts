@@ -4,6 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import type { CuratedDeck, Block } from "./curate";
+import { chartPalette, decimalsNeeded, niceAxis, numberFormatCode } from "./chart-style";
 import {
   BLOCK_SPACING,
   CHART_MAX_H,
@@ -11,10 +12,12 @@ import {
   CONTENT_BOTTOM,
   CONTENT_TOP,
   CONTENT_W,
-  PHOTOS_MIN_H,
   SPLIT_GUTTER,
   SPLIT_W,
+  type PhotoGeometry,
   type Row,
+  photoGeometry,
+  photosMinHeight,
   rowIsFlexible,
   rowMinHeight,
   sectionSlides,
@@ -152,60 +155,6 @@ function renderKpis(slide: pptxgen.Slide, items: { label: string; value: string 
   });
 }
 
-/** Mixes a hex colour toward white. 0 returns it unchanged, 1 returns white. */
-function tint(hex: string, amount: number): string {
-  const n = parseInt(hex, 16);
-  const mix = (c: number) => Math.round(c + (255 - c) * amount);
-  return [mix((n >> 16) & 255), mix((n >> 8) & 255), mix(n & 255)]
-    .map((v) => v.toString(16).padStart(2, "0"))
-    .join("")
-    .toUpperCase();
-}
-
-/**
- * Exactly `n` distinct brand colours, alternating the two brand hues and
- * stepping a tint lighter each time round, so adjacent entries never collide.
- *
- * The LENGTH is the point, not just the hues. pptxgenjs colours pie slices —
- * and the bars of a single-series bar chart — per data point, and once the
- * index passes the end of the palette it fills the rest with
- * `chartColors[Math.floor(Math.random() * chartColors.length)]`
- * (dist/pptxgen.cjs.js, the `<c:dPt>` branches). Verified by generating the
- * same five-slice pie six times against a two-colour palette and getting six
- * different colour assignments, two of them with touching slices the same
- * colour. A palette shorter than the data therefore produces a deck that does
- * not reproduce and can be unreadable. Always pass one colour per point.
- */
-function chartPalette(n: number): string[] {
-  const bases = [FM_BLUE, SUNSHINE];
-  // The step is large because a small one does not separate: at 0.21 the third
-  // series came back a slate blue that preflight flagged as reading like the
-  // first. Lightness has to move far enough to be a different colour, not a
-  // shade of the same one.
-  const steps = [0, 0.55, 0.3, 0.75];
-  return Array.from({ length: Math.max(1, n) }, (_, i) =>
-    tint(bases[i % bases.length], steps[Math.floor(i / bases.length) % steps.length])
-  );
-}
-
-/**
- * Axis bounds that pad the data a little and then land on round numbers.
- *
- * Padding alone leaves the raw arithmetic on the axis — a real consumption
- * series produced ticks reading 19284, 39284, 59284 — so the bounds are
- * snapped outwards to a sensible step.
- */
-function niceAxisBounds(lo: number, hi: number): { min: number; max: number } {
-  const span = hi - lo || Math.abs(hi) || 1;
-  const rawMin = lo - span * 0.15;
-  const rawMax = hi + span * 0.15;
-  const step = Math.pow(10, Math.floor(Math.log10(rawMax - rawMin))) / 2;
-  return {
-    min: Math.floor(rawMin / step) * step,
-    max: Math.ceil(rawMax / step) * step,
-  };
-}
-
 /**
  * Renders a curated chart into the given box.
  *
@@ -223,6 +172,13 @@ function renderChart(
   /** True when the chart shares its band with the table of the same figures. */
   compact = false
 ) {
+  const all = b.series.flatMap((s) => s.values);
+  // Shown exactly as the source states them. A fixed "#,##0" rounded 12.5 to
+  // 13 on both the axis and the data labels - a figure that is not in the
+  // source, which is the one thing this system must never print.
+  const valueFormat = numberFormatCode(decimalsNeeded(all));
+  const unit = b.unit?.trim() || "";
+
   const common = {
     x,
     y,
@@ -241,9 +197,7 @@ function renderChart(
     // "Housekeeping" broke mid-word under its own bar.
     catAxisLabelFontSize: compact ? 8 : 10,
     valAxisLabelFontSize: compact ? 8 : 10,
-    // Matches the data labels, which are separated by default. Leaving the
-    // axis bare put "100000" opposite "1,448,000" on the same chart.
-    valAxisLabelFormatCode: "#,##0",
+    dataLabelFormatCode: valueFormat,
     dataLabelFontFace: BODY_FONT,
     legendFontFace: BODY_FONT,
     legendColor: MUTED,
@@ -266,6 +220,10 @@ function renderChart(
       [{ name: b.series[0]?.name ?? "", labels: cats, values: b.series[0]?.values ?? [] }],
       {
         ...common,
+        // A pie has no value axis to carry the unit, so it goes on the title.
+        // The unit used to reach the preview and never the deck.
+        showTitle: !!(b.title || unit),
+        title: b.title ? (unit ? `${b.title} (${unit})` : b.title) : unit,
         // One colour per slice — see chartPalette.
         chartColors: chartPalette(cats.length),
         showLegend: true,
@@ -287,8 +245,7 @@ function renderChart(
     // is what makes the shape visible, and it matches the scale the browser
     // preview already uses. Bars are the opposite case: see valAxisMinVal
     // below.
-    const all = b.series.flatMap((s) => s.values);
-    const { min, max } = niceAxisBounds(Math.min(...all), Math.max(...all));
+    const axis = niceAxis(all);
 
     slide.addChart(
       "line",
@@ -301,8 +258,17 @@ function renderChart(
         lineSmooth: false,
         showLegend: b.series.length > 1,
         legendPos: "b",
-        valAxisMinVal: min,
-        valAxisMaxVal: max,
+        valAxisMinVal: axis.min,
+        valAxisMaxVal: axis.max,
+        // Gridlines on the axis's own round step. Left to the engine they fell
+        // on half-units of the data, so points read half a unit high.
+        valAxisMajorUnit: axis.step,
+        valAxisLabelFormatCode: numberFormatCode(decimalsNeeded([axis.min, axis.step])),
+        showValAxisTitle: !!unit,
+        valAxisTitle: unit,
+        valAxisTitleColor: MUTED,
+        valAxisTitleFontFace: BODY_FONT,
+        valAxisTitleFontSize: compact ? 8 : 9,
         showValue: false,
       }
     );
@@ -324,6 +290,10 @@ function renderChart(
     values: horizontal ? [...s.values].reverse() : s.values,
   }));
 
+  // Includes zero, and reaches below it when any value is negative - a
+  // negative bar used to fall below an axis pinned at 0 and simply vanish.
+  const axis = niceAxis(all, { includeZero: true, pad: 0.1 });
+
   slide.addChart("bar", series, {
     ...common,
     barDir: horizontal ? "bar" : "col",
@@ -342,7 +312,15 @@ function renderChart(
     // A bar encodes its value as a length, so it has to start at zero.
     // Left to itself the axis baselines just under the smallest value and
     // "14 of 16 completed" renders as a near-empty bar beside a full one.
-    valAxisMinVal: 0,
+    valAxisMinVal: axis.min,
+    valAxisMaxVal: axis.max,
+    valAxisMajorUnit: axis.step,
+    valAxisLabelFormatCode: numberFormatCode(decimalsNeeded([axis.min, axis.step])),
+    showValAxisTitle: !!unit,
+    valAxisTitle: unit,
+    valAxisTitleColor: MUTED,
+    valAxisTitleFontFace: BODY_FONT,
+    valAxisTitleFontSize: compact ? 8 : 9,
     showLegend: series.length > 1,
     legendPos: "b",
   });
@@ -427,29 +405,6 @@ async function toGrayscale(srcPath: string): Promise<string> {
   } catch {
     return srcPath;
   }
-}
-
-type PhotoGeometry = { cols: number; rows: number; w: number; h: number; used: number };
-
-/** Pure geometry for a photo grid, so its height can be measured before rendering. */
-function photoGeometry(count: number, available: number): PhotoGeometry | null {
-  if (count === 0 || available < 1.1) return null;
-  const gap = 0.18;
-  const cols = count <= 3 ? count : 3;
-  const rows = Math.ceil(count / cols);
-  const ratio = rows > 1 ? 1.6 : 4 / 3;
-
-  let w = (CONTENT_W - gap * (cols - 1)) / cols;
-  let h = w / ratio;
-
-  const needed = rows * h + (rows - 1) * gap;
-  if (needed > available) {
-    const scale = (available - (rows - 1) * gap) / (rows * h);
-    if (scale < 0.35) return null;
-    w *= scale;
-    h *= scale;
-  }
-  return { cols, rows, w, h, used: rows * h + (rows - 1) * gap };
 }
 
 /**
@@ -595,7 +550,13 @@ async function renderRows(
   const isSplitRow = (m: Measured) => m.row.kind === "split";
 
   const growable = measured.filter((m) => isSplitRow(m) || isChartRow(m));
-  const photoReserve = measured.filter(isPhotoRow).length * PHOTOS_MIN_H;
+  const photoBlock = (m: Measured) =>
+    (m.row as { kind: "full"; block: Block }).block as Extract<Block, { type: "photos" }>;
+  // Each grid's real minimum, so a chart growing into the spare space cannot
+  // leave a grid less room than it needs to be drawn at all.
+  const photoReserve = measured
+    .filter(isPhotoRow)
+    .reduce((sum, m) => sum + photosMinHeight(photoBlock(m).imageIds.length), 0);
 
   for (const m of growable) {
     m.h = Math.max(CHART_MIN_H, rowMinHeight(m.row));
@@ -616,14 +577,29 @@ async function renderRows(
     flexBudget -= give;
   }
 
-  for (const m of measured) {
-    if (!isPhotoRow(m)) continue;
-    const block = (m.row as { kind: "full"; block: Block }).block as Extract<Block, { type: "photos" }>;
-    const geo = photoGeometry(Math.min(block.imageIds.length, 6), Math.max(0, flexBudget));
+  // Photo grids share what is left: each first gets its own minimum, then the
+  // excess is split between them. The first grid used to be handed the whole
+  // remainder, so a second grid on the same slide got nothing and was not
+  // drawn; an equal split is no better when the grids differ, since a
+  // six-photo grid needs more room than a three-photo one.
+  const photoRows = measured.filter(isPhotoRow);
+  let excess = flexBudget - photoReserve;
+  let photoRowsLeft = photoRows.length;
+  for (const m of photoRows) {
+    const block = photoBlock(m);
+    const min = photosMinHeight(block.imageIds.length);
+    const share = min + Math.max(0, excess) / Math.max(1, photoRowsLeft);
+    photoRowsLeft--;
+    const geo = photoGeometry(Math.min(block.imageIds.length, 6), share);
     if (geo) {
       m.geo = geo;
       m.h = geo.used;
       flexBudget -= geo.used;
+      excess -= Math.max(0, geo.used - min);
+    } else {
+      // The planner reserved this grid's minimum, so this should not happen;
+      // if it does, say so rather than lose the photographs quietly.
+      console.warn(`[deck] photo grid of ${block.imageIds.length} not drawn: ${share.toFixed(2)}in available`);
     }
   }
 
