@@ -1,3 +1,5 @@
+import { groundDeck, type GroundingIssue } from "./grounding";
+
 export type ChecklistItem = {
   key: string;
   label: string;
@@ -19,6 +21,8 @@ What counts as genuinely present:
 - If the same data appears more than once (duplicate embedded workbooks, or overlapping files), treat it as one thing.
 
 Absolute rule: never invent, estimate, round, or infer a number, name, or date that is not in the source content.
+The only figures you may produce that are not written in the source are: the total of figures you show in the same section (a chart series, or a table column or row), and the count of rows or categories you show. Nothing else - no percentage, average, rate or difference the source does not state. Every figure is checked against the source after you respond, and any that cannot be accounted for is removed.
+Each figure belongs to the period its own source row states. Where a workbook row carries a date, that date - not a slide heading - is the figure's period. Never place a figure under a month its own row does not name.
 `;
 
 function checklistBlock(items: ChecklistItem[]): string {
@@ -37,22 +41,25 @@ const VALIDATE_SYSTEM = `You are validating whether an uploaded submission actua
 
 Read the whole content, not just titles. Site names and months appear in slide titles, headers, footers, table captions, sheet names, and body text.
 
-Decide one of three verdicts:
+Decide one of four verdicts:
 - "match" — the content names this site and/or this month, and nothing contradicts either.
 - "mismatch" — the content clearly names a DIFFERENT site, or a DIFFERENT report month. This is the case to catch. Quote the exact text that contradicts.
 - "unidentified" — the content never names any site or month at all (for example a raw data workbook of pure figures). This is NOT a failure: with nothing to contradict the expected values, it passes. Treat it as acceptable.
+- "period_conflict" — the slides or titles name this site and this month, but the dated figures in the data belong to a different period: workbook rows whose dates (shown as e.g. "Apr 2025" or "1 Apr 2025") do not include the report month at all. Typical cause: last period's deck copied forward with its embedded workbook left unchanged. Quote the dated rows and say which period they cover. A rolling comparison that includes the report month is NOT a conflict.
 
-Be strict about genuine conflicts and relaxed about silence. Do not report a mismatch because the site name is merely absent. Do not report a mismatch on a nearby month if the content is plainly a rolling comparison (e.g. a consumption table showing previous months alongside the current one) — only when the report's own subject month differs.
+Be strict about genuine conflicts and relaxed about silence. Prefer "mismatch" when the report itself is plainly for another site or month; use "period_conflict" only when the report's own titles are right and the figures underneath are from another period. Do not report a mismatch because the site name is merely absent. Do not report a mismatch on a nearby month if the content is plainly a rolling comparison (e.g. a consumption table showing previous months alongside the current one) — only when the report's own subject month differs.
 
 Respond with ONLY valid JSON, no fences:
 {"verdict":"match","evidence":"Slide 1 title reads 'MMR - JUNE 2025 - AHUJA TOWER'"}
 or
 {"verdict":"mismatch","evidence":"Slide 1 title reads 'Altimus - May 2026', but this link is for Ahuja Tower, August 2026","conflictType":"site"}
 or
-{"verdict":"unidentified","evidence":"No site name or month appears anywhere in the content"}`;
+{"verdict":"unidentified","evidence":"No site name or month appears anywhere in the content"}
+or
+{"verdict":"period_conflict","evidence":"Slides are titled August 2026, but the electricity, water and fit-out workbook rows are dated Apr 2025 to Jun 2025"}`;
 
 export type ValidationResult = {
-  verdict: "match" | "mismatch" | "unidentified";
+  verdict: "match" | "mismatch" | "unidentified" | "period_conflict";
   evidence: string;
   conflictType?: "site" | "month" | "both";
 };
@@ -91,7 +98,7 @@ ${CORE_RULES}
 
 IMPORTANT — what to include: build the deck ONLY from parameters that have genuine content. Omit anything absent entirely. Do not emit a section, a placeholder, or a "not available" slide for missing data — a shorter deck of real substance is the goal, not a fixed structure with holes. Order the sections you do include by what matters most for this month rather than by the checklist order, and lead with what a client would most want to see.
 
-Chart what can be charted. Wherever a section's figures form a series — across months, across locations, across categories, or as parts of one total — give that section a chart block. A deck of this kind normally carries several; one made entirely of tables reads as a data dump rather than a report.
+Chart what can be charted. Wherever a section's figures form a series — across months, across locations, across categories, or as parts of one total — give that section a chart block. A section of real series data shown only as a table reads as a data dump rather than a report. Chart only from data you have in full: a sheet marked "... N more rows not shown" has been cut short, so never count or total it.
 
 Each section becomes one slide, holding several blocks stacked in order:
 - {"type":"table","headers":[...],"rows":[[...]]} — real headers and rows exactly as in the source. At most 10 rows so it fits; if the source has more, choose the most representative and add a "note" block stating the true total.
@@ -139,6 +146,8 @@ export type CuratedDeck = {
   /** Photo id for the cover panel, chosen from the manifest. */
   coverImageId?: string;
   sections: CuratedSection[];
+  /** Figures the grounding check removed or flagged. Not rendered; shown to the submitter. */
+  grounding?: GroundingIssue[];
 };
 
 async function callClaude(system: string, user: string, maxTokens: number): Promise<string> {
@@ -213,52 +222,126 @@ function chartValue(v: unknown): number | null {
 }
 
 /**
- * Drops chart blocks the renderer cannot draw honestly.
+ * Brings the model's blocks into the shapes the renderer can draw honestly.
  *
- * A chart is the one block type where a malformed response degrades into a
- * plausible-looking lie rather than a visible break: a series shorter than its
- * categories silently slides every remaining value onto the wrong month. So a
- * chart that doesn't hold together is removed outright — the documented
- * behaviour for content that isn't really there — rather than patched up.
+ * Charts are where a malformed response degrades into a plausible-looking
+ * lie rather than a visible break: a series shorter than its categories
+ * silently slides every remaining value onto the wrong month. So a chart
+ * that does not hold together is never drawn as a chart. It used to be
+ * dropped, and when it was a section's only block the whole section went
+ * with it - one "NA" in a series could remove a parameter from the deck. Now
+ * it becomes a table of exactly what the model gave, which shows a gap as a
+ * gap. Every change is logged: a dropped or reshaped block is otherwise
+ * invisible in the finished deck.
  */
-function sanitiseCharts(deck: CuratedDeck): CuratedDeck {
-  const sections = deck.sections.map((section) => ({
-    ...section,
-    blocks: section.blocks.filter((block) => {
-      if (block.type !== "chart") return true;
+export function sanitiseBlocks(deck: CuratedDeck): CuratedDeck {
+  const sections = deck.sections.map((section) => {
+    const out: Block[] = [];
+    for (const block of section.blocks) {
+      if (block.type === "kpis") {
+        // The renderer draws four cards a row; a fifth used to vanish. Split
+        // instead, so every figure the model chose is still shown.
+        const items = Array.isArray(block.items) ? block.items : [];
+        if (items.length > 4) {
+          console.warn(`[curate] kpis in section "${section.key}": split ${items.length} cards into rows of four`);
+        }
+        for (let i = 0; i < items.length; i += 4) out.push({ type: "kpis", items: items.slice(i, i + 4) });
+        continue;
+      }
+      if (block.type !== "chart") {
+        out.push(block);
+        continue;
+      }
 
-      // A dropped chart is invisible in the finished deck, so say why.
-      const drop = (why: string) => {
-        console.warn(`[curate] dropped chart in section "${section.key}": ${why}`);
-        return false;
+      const asTable = (why: string): Block | null => {
+        const cats = Array.isArray(block.categories) ? block.categories.map((c) => String(c ?? "")) : [];
+        const series = Array.isArray(block.series) ? block.series : [];
+        console.warn(`[curate] chart in section "${section.key}" shown as a table: ${why}`);
+        if (cats.length === 0 || series.length === 0) return null;
+        return {
+          type: "table",
+          headers: ["", ...series.map((s) => String(s?.name ?? ""))],
+          rows: cats.map((c, i) => [
+            c,
+            ...series.map((s) => (Array.isArray(s?.values) && s.values[i] != null ? String(s.values[i]) : "")),
+          ]),
+        };
       };
 
       const cats = Array.isArray(block.categories) ? block.categories.map((c) => String(c ?? "")) : [];
-      if (cats.length < 2 || cats.length > 12) return drop(`${cats.length} categories, needs 2-12`);
-      if (!Array.isArray(block.series) || block.series.length === 0) return drop("no series");
+      if (!Array.isArray(block.series) || block.series.length === 0) {
+        const t = asTable("no series");
+        if (t) out.push(t);
+        continue;
+      }
+      if (cats.length < 2 || cats.length > 12) {
+        const t = asTable(`${cats.length} categories, needs 2-12`);
+        if (t) out.push(t);
+        continue;
+      }
 
       // A pie is parts of one whole; extra series are meaningless on it.
-      const series = block.chartType === "pie" ? block.series.slice(0, 1) : block.series.slice(0, 3);
+      const max = block.chartType === "pie" ? 1 : 3;
+      if (block.series.length > max) {
+        console.warn(
+          `[curate] chart in section "${section.key}": kept ${max} of ${block.series.length} series, ` +
+            `dropped ${block.series.slice(max).map((s) => `"${s?.name}"`).join(", ")}`
+        );
+      }
+      const series = block.series.slice(0, max);
 
+      let problem: string | null = null;
       const clean: { name: string; values: number[] }[] = [];
       for (const s of series) {
         if (!Array.isArray(s?.values) || s.values.length !== cats.length) {
-          return drop(`series "${s?.name}" has ${s?.values?.length} values for ${cats.length} categories`);
+          problem = `series "${s?.name}" has ${s?.values?.length} values for ${cats.length} categories`;
+          break;
         }
         const values = s.values.map(chartValue);
         const bad = values.findIndex((v) => v === null);
-        if (bad !== -1) return drop(`series "${s?.name}" value ${JSON.stringify(s.values[bad])} is not a number`);
+        if (bad !== -1) {
+          problem = `series "${s?.name}" value ${JSON.stringify(s.values[bad])} is not a number`;
+          break;
+        }
         clean.push({ name: String(s.name ?? ""), values: values as number[] });
       }
+      if (problem) {
+        const t = asTable(problem);
+        if (t) out.push(t);
+        continue;
+      }
+      out.push({ ...block, categories: cats, series: clean });
+    }
+    return { ...section, blocks: out };
+  });
 
-      block.categories = cats;
-      block.series = clean;
-      return true;
-    }),
-  }));
-
-  // A section whose only block was a rejected chart has nothing left to show.
   return { ...deck, sections: sections.filter((s) => s.blocks.length > 0) };
+}
+
+/**
+ * Keeps only photographs that exist.
+ *
+ * The model picks ids from a manifest, but nothing stopped it naming one that
+ * is not there, or the same one twice. The renderer skipped unknown ids while
+ * the preview drew a tile for each, so the submitter approved a photo grid
+ * that came out smaller in the filed deck. Checked once here, both agree.
+ */
+export function sanitisePhotos(deck: CuratedDeck, knownIds: string[]): CuratedDeck {
+  const known = new Set(knownIds);
+  const sections = deck.sections
+    .map((section) => ({
+      ...section,
+      blocks: section.blocks.flatMap((b): Block[] => {
+        if (b.type !== "photos") return [b];
+        const ids = [...new Set((Array.isArray(b.imageIds) ? b.imageIds : []).filter((id) => known.has(id)))].slice(0, 6);
+        const dropped = (b.imageIds ?? []).length - ids.length;
+        if (dropped > 0) console.warn(`[curate] photos in "${section.key}": ${dropped} id(s) unknown, repeated or over six`);
+        return ids.length > 0 ? [{ ...b, imageIds: ids }] : [];
+      }),
+    }))
+    .filter((s) => s.blocks.length > 0);
+  const coverImageId = deck.coverImageId && known.has(deck.coverImageId) ? deck.coverImageId : undefined;
+  return { ...deck, coverImageId, sections };
 }
 
 export async function curateDeck(
@@ -274,5 +357,14 @@ export async function curateDeck(
       ? userAnswers.map((a) => `- ${a.label}: ${a.answer}`).join("\n")
       : "(no gap answers were supplied)";
   const user = `Site: ${siteName}\nReport month: ${reportMonth}\n\n--- AVAILABLE PHOTOGRAPHY ---\n${imageManifest}\n\n--- ANSWERS SUPPLIED FOR GAPS ---\n${answers}\n\n--- EXTRACTED SOURCE CONTENT ---\n${combinedText}`;
-  return sanitiseCharts(parseJson<CuratedDeck>(await callClaude(curateSystem(items), user, 20000), "curation"));
+  const deck = sanitiseBlocks(parseJson<CuratedDeck>(await callClaude(curateSystem(items), user, 20000), "curation"));
+
+  // The submitter's typed answers are source material too: a figure they
+  // supplied for a gap is theirs, not the model's.
+  const source = [combinedText, ...userAnswers.map((a) => a.answer)].join("\n");
+  const { deck: grounded, issues } = groundDeck(deck, source);
+  for (const i of issues) {
+    console.warn(`[grounding] ${i.action} ${i.section} / ${i.where}: ${i.value.slice(0, 120)}`);
+  }
+  return { ...grounded, grounding: issues };
 }
