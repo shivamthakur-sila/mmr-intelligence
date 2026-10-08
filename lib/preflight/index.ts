@@ -22,28 +22,45 @@ export type PreflightReport = {
  *
  * This is the quality gate the project has been missing: the deck is only
  * ever as good as the last time somebody looked at it, and nobody looks at
- * 1,000 decks a month. `workDir` defaults to a temp directory; pass one to
- * keep the images for inspection.
+ * 1,000 decks a month. `workDir` defaults to a temp directory, which is
+ * removed before this returns, so the `file` paths in the report only resolve
+ * when a `workDir` was passed; pass one to keep the images for inspection.
  */
 export async function preflight(
   pptx: Buffer,
   opts: { workDir?: string; model?: string; dpi?: number } = {}
 ): Promise<PreflightReport> {
+  // A render leaves the deck, its PDF, a LibreOffice profile and one PNG per
+  // slide, around 10MB, so a directory this call created is its to remove. A
+  // caller's directory is left alone.
+  const ownsWorkDir = opts.workDir === undefined;
   const workDir = opts.workDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "preflight-"));
-  const slides = await renderPptx(pptx, workDir, opts.dpi ?? 100);
-  const findings = await critiqueSlides(slides, opts.model);
+  try {
+    const slides = await renderPptx(pptx, workDir, opts.dpi ?? 100);
+    const findings = await critiqueSlides(slides, opts.model);
 
-  const count = (s: Finding["severity"]) => findings.filter((f) => f.severity === s).length;
-  const blockers = count("blocker");
+    const count = (s: Finding["severity"]) => findings.filter((f) => f.severity === s).length;
+    const blockers = count("blocker");
 
-  return {
-    slides,
-    findings,
-    blockers,
-    majors: count("major"),
-    minors: count("minor"),
-    passed: blockers === 0,
-  };
+    return {
+      slides,
+      findings,
+      blockers,
+      majors: count("major"),
+      minors: count("minor"),
+      passed: blockers === 0,
+    };
+  } finally {
+    if (ownsWorkDir) {
+      // A cleanup failure must not replace the report or the real error, so
+      // it is logged instead of thrown.
+      try {
+        fs.rmSync(workDir, { recursive: true, force: true, maxRetries: 3 });
+      } catch (e) {
+        console.warn(`preflight: could not remove temp directory ${workDir}: ${(e as Error).message}`);
+      }
+    }
+  }
 }
 
 /** The report as a short plain-text summary, for logs and CI output. */
