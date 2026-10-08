@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import * as XLSX from "xlsx";
+import { readWorkbookRows } from "./xlsx";
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" });
 
@@ -154,10 +154,10 @@ export async function extractPptx(buffer: Buffer): Promise<{
   for (const path of embeddingFiles) {
     const embedBuffer = await zip.file(path)!.async("nodebuffer");
     try {
-      const wb = XLSX.read(embedBuffer, { type: "buffer" });
+      // Same reader as standalone workbooks, so date cells arrive as
+      // "Apr 2025" rather than Excel's serial 45748 here too.
       const sheets: Record<string, unknown[][]> = {};
-      for (const sheetName of wb.SheetNames) {
-        const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1 }) as unknown[][];
+      for (const [sheetName, raw] of Object.entries(readWorkbookRows(embedBuffer))) {
         sheets[sheetName] = raw.filter(isRealRow);
       }
       embeddedWorkbooks.push({ fileName: path.split("/").pop()!, sheets });

@@ -1,16 +1,23 @@
+import { createHash } from "node:crypto";
 import { extractPptx } from "./parsing/pptx";
 import { extractXlsx } from "./parsing/xlsx";
 import { extractImages, imageManifest, type ExtractedImage } from "./parsing/images";
 
+/** Rows of an embedded sheet shown to the model before the rest are summarised as a count. */
+const EMBEDDED_SHEET_ROW_LIMIT = 25;
+
 function sheetFingerprint(sheets: Record<string, unknown[][]>): string {
-  // Two embedded workbooks count as the same for our purposes if they
-  // share sheet names and row counts. Confirmed real case: one MMR had
-  // several embedded copies of a single master workbook, and without
-  // this, every sheet of every copy became its own near-duplicate slide.
-  return Object.entries(sheets)
-    .map(([name, rows]) => `${name}:${rows.length}`)
+  // Dedup exists because one MMR had several embedded copies of a single
+  // master workbook, and without it every sheet of every copy became its own
+  // near-duplicate slide. It hashes the content, not the shape: an earlier
+  // fingerprint of sheet names and row counts collapsed different workbooks
+  // that merely had the same layout - a real MMR had four "Sheet1", 14-row
+  // workbooks holding four different datasets, and three never reached the
+  // model. Sheet names are sorted so only a true copy matches.
+  const ordered = Object.keys(sheets)
     .sort()
-    .join("|");
+    .map((name) => [name, sheets[name]]);
+  return createHash("sha1").update(JSON.stringify(ordered)).digest("hex");
 }
 
 export async function extractAllFiles(files: { buffer: Buffer; name: string }[]) {
@@ -42,9 +49,19 @@ export async function extractAllFiles(files: { buffer: Buffer; name: string }[])
         const fp = sheetFingerprint(wb.sheets);
         if (seenFingerprints.has(fp)) continue;
         seenFingerprints.add(fp);
+        // Each sheet carries its real row count and says when it was cut, as
+        // standalone workbooks already do; otherwise the model cannot tell a
+        // truncated list from a complete one and may count or sum a part of it.
         const sheetText = Object.entries(wb.sheets)
-          .filter(([, rows]) => rows.length > 1)
-          .map(([name, rows]) => `  sheet "${name}":\n` + rows.slice(0, 25).map((r) => "    " + JSON.stringify(r)).join("\n"))
+          .filter(([, rows]) => rows.length > 0)
+          .map(([name, rows]) => {
+            const lines = [`  sheet "${name}" (${rows.length} real data rows):`];
+            for (const r of rows.slice(0, EMBEDDED_SHEET_ROW_LIMIT)) lines.push("    " + JSON.stringify(r));
+            if (rows.length > EMBEDDED_SHEET_ROW_LIMIT) {
+              lines.push(`    ... ${rows.length - EMBEDDED_SHEET_ROW_LIMIT} more rows not shown`);
+            }
+            return lines.join("\n");
+          })
           .join("\n");
         if (sheetText) {
           textParts.push(`=== Embedded workbook in ${file.name} (${wb.fileName}) ===\n${sheetText}`);
