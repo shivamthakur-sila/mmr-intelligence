@@ -9,6 +9,8 @@ import {
   KPI_STACK_CARD_H,
   KPI_STACK_GAP,
   SPLIT_GUTTER,
+  TEXT_PANEL_MAX_W,
+  TEXT_PANEL_PAD,
   deckOutline,
   identifierColumns,
   numericColumns,
@@ -413,7 +415,7 @@ function SectionSlide({
               <BlockView block={row.left} w={row.leftW} photos={photos} />
             </div>
             <div style={box(CONTENT_X + row.leftW + SPLIT_GUTTER, y, splitRightW(row), h)}>
-              <BlockView block={row.right} w={splitRightW(row)} photos={photos} />
+              <BlockView block={row.right} w={splitRightW(row)} geo={row.right.type === "photos" ? geo : undefined} photos={photos} />
             </div>
           </div>
         )
@@ -552,7 +554,7 @@ function BlockView({
           {ids.map((id) =>
             photos[id] ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img key={id} src={photos[id]} alt="" style={{ width: inch(geo.w), height: inch(geo.h), objectFit: "cover" }} />
+              <img key={id} src={photos[id]} alt="" style={{ width: inch(geo.w), height: inch(geo.h), objectFit: "cover", border: `1px solid ${CHARCOAL}` }} />
             ) : (
               <div key={id} style={{ width: inch(geo.w), height: inch(geo.h), background: "var(--wash)" }} />
             )
@@ -562,13 +564,21 @@ function BlockView({
     );
   }
 
+  // Beside photos or a chart, text sits in a pale panel with an orange edge.
+  const panel: React.CSSProperties =
+    w < TEXT_PANEL_MAX_W
+      ? { height: "100%", background: "#F3F5F8", borderLeft: `${inch(0.06)} solid var(--sun)`, padding: inch(TEXT_PANEL_PAD) }
+      : {};
+
   if (block.type === "bullets") {
     return (
-      <ul style={{ paddingLeft: inch(0.3), fontSize: pt(12), color: SLATE, lineHeight: 1.25, listStyle: "disc" }}>
-        {block.items.map((t, n) => (
-          <li key={n}>{t}</li>
-        ))}
-      </ul>
+      <div style={panel}>
+        <ul style={{ paddingLeft: inch(0.3), fontSize: pt(12), color: SLATE, lineHeight: 1.25, listStyle: "disc" }}>
+          {block.items.map((t, n) => (
+            <li key={n} style={{ marginBottom: w < TEXT_PANEL_MAX_W ? pt(4) : 0 }}>{t}</li>
+          ))}
+        </ul>
+      </div>
     );
   }
 
@@ -580,7 +590,11 @@ function BlockView({
     );
   }
 
-  return <p style={{ fontSize: pt(12.5), color: SLATE, lineHeight: 1.3 }}>{block.text}</p>;
+  return (
+    <div style={panel}>
+      <p style={{ fontSize: pt(12.5), color: SLATE, lineHeight: 1.3 }}>{block.text}</p>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------

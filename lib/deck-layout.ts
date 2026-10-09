@@ -46,6 +46,13 @@ export const FIT_TOLERANCE = 0.06;
 export const SPLIT_GUTTER = 0.3;
 export const SPLIT_W = (CONTENT_W - SPLIT_GUTTER) / 2;
 
+/** Widths tried for the commentary panel when text stands beside photos or a chart, narrowest first. */
+export const TEXT_COL_WS = [4.9, 5.6, 6.3];
+/** Text narrower than this is set in a panel: it is standing beside evidence. */
+export const TEXT_PANEL_MAX_W = CONTENT_W * 0.6;
+/** Inner padding of that panel, all round. */
+export const TEXT_PANEL_PAD = 0.18;
+
 /** Width of the KPI column when KPIs stand beside a table or chart. */
 export const KPI_COL_W = 2.6;
 /** A row of KPI cards across the slide. */
@@ -333,9 +340,14 @@ export function blockHeight(b: Block, width = CONTENT_W): number {
     case "table":
       return tableGeometry(b, width).total + footnoteHeight(b.footnote, width);
     case "narrative":
-      return narrativeHeight(b.text, width);
-    case "bullets":
-      return b.items.reduce((sum, item) => sum + bulletHeight(item, width), 0);
+    case "bullets": {
+      // Beside photos or a chart, text sits in a padded panel.
+      const panel = width < TEXT_PANEL_MAX_W;
+      const inner = panel ? width - 2 * TEXT_PANEL_PAD : width;
+      const text =
+        b.type === "narrative" ? narrativeHeight(b.text, inner) : b.items.reduce((sum, item) => sum + bulletHeight(item, inner), 0);
+      return panel ? text + 2 * TEXT_PANEL_PAD : text;
+    }
     case "photos":
     case "chart":
       // Photo grids and charts flex to whatever vertical space remains rather
@@ -403,6 +415,27 @@ export function planRows(blocks: Block[]): Row[] {
         b.type === "chart" || (tokensFit(b, rightW) && blockHeight(b, rightW) <= CONTENT_H);
       if (fits && kpiStackHeight(a.items.length) <= CONTENT_H) {
         rows.push({ kind: "split", left: a, right: b, leftW: KPI_COL_W });
+        i++;
+        continue;
+      }
+    }
+
+    // Commentary beside its evidence - bullets or a narrative in a panel on
+    // the left, photos or a chart filling the height on the right - as in the
+    // house decks' activity pages. Stacked, full-width bullets ran 150
+    // characters a line over a band of inch-wide photos.
+    const isText = (x: Block | undefined) => x?.type === "bullets" || x?.type === "narrative";
+    const isEvidence = (x: Block | undefined) => x?.type === "photos" || x?.type === "chart";
+    if ((isText(a) && isEvidence(b)) || (isEvidence(a) && isText(b))) {
+      const text = (isText(a) ? a : b)!;
+      const evidence = (isText(a) ? b : a)!;
+      const takesTable = evidence.type === "chart" && chartAndTable(evidence, blocks[i + 2]);
+      // The narrowest panel the text fits, so the evidence keeps the most room.
+      const leftW = TEXT_COL_WS.find(
+        (w) => blockHeight(text, w) <= CONTENT_H && minBlockHeight(evidence, CONTENT_W - w - SPLIT_GUTTER) <= CONTENT_H
+      );
+      if (!takesTable && leftW !== undefined) {
+        rows.push({ kind: "split", left: text, right: evidence, leftW });
         i++;
         continue;
       }
@@ -489,6 +522,13 @@ export function placeRows(rows: Row[]): PlacedRow[] {
       m.h = geo.used;
       excess -= Math.max(0, geo.used - min);
     }
+  }
+
+  // A photo grid beside text takes the height its row was given.
+  for (const m of measured) {
+    if (m.row.kind !== "split" || m.row.right.type !== "photos") continue;
+    const p = m.row.right;
+    m.geo = photoGeometry(Math.min(p.imageIds.length, 6), m.h, p.aspect, splitRightW(m.row)) ?? undefined;
   }
 
   const placed: PlacedRow[] = [];

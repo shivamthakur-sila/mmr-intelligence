@@ -15,6 +15,8 @@ import {
   KPI_STACK_CARD_H,
   KPI_STACK_GAP,
   SPLIT_GUTTER,
+  TEXT_PANEL_MAX_W,
+  TEXT_PANEL_PAD,
   type PhotoGeometry,
   type Row,
   blockHeight,
@@ -38,6 +40,8 @@ const SLATE = "2D2D2D";
 const CHARCOAL = "3C3C3B";
 // The small tab on the right edge of every content slide in the reference.
 const EDGE_TAB = "FFAF00";
+// Behind commentary set beside photos or a chart.
+const PANEL_FILL = "F3F5F8";
 const MUTED = "697784";
 const HAIRLINE = "E5E5E4";
 const WHITE = "FFFFFF";
@@ -795,12 +799,14 @@ async function renderPhotos(
       `tile${(geo.w / geo.h).toFixed(3)}`,
       true
     );
-    slide.addImage({
-      path: cropped,
-      x: startX + col * (geo.w + gap),
-      y: y + row * (geo.h + gap),
-      w: geo.w,
-      h: geo.h,
+    const tx = startX + col * (geo.w + gap);
+    const ty = y + row * (geo.h + gap);
+    slide.addImage({ path: cropped, x: tx, y: ty, w: geo.w, h: geo.h });
+    // A thin charcoal frame, as the reference frames its evidence photos.
+    slide.addShape("rect", {
+      x: tx, y: ty, w: geo.w, h: geo.h,
+      fill: { type: "none" } as unknown as pptxgen.ShapeFillProps,
+      line: { color: CHARCOAL, width: 1 },
     });
   }
 }
@@ -829,20 +835,38 @@ async function renderBlock(
       renderTable(slide, block, y, x, w);
       break;
     case "narrative":
-      slide.addText(block.text, {
-        x, y, w, h,
-        fontFace: BODY_FONT, fontSize: 12.5, color: SLATE, valign: "top", lineSpacingMultiple: 1.1,
-      });
+    case "bullets": {
+      // Beside photos or a chart, text sits in a pale panel with an orange
+      // edge, as the house decks set an activity's commentary.
+      const panel = w < TEXT_PANEL_MAX_W;
+      let tx = x;
+      let ty = y;
+      let tw = w;
+      let th = h;
+      if (panel) {
+        slide.addShape("rect", { x, y, w, h, fill: { color: PANEL_FILL }, line: { type: "none" } });
+        slide.addShape("rect", { x, y, w: 0.06, h, fill: { color: SUNSHINE }, line: { type: "none" } });
+        tx = x + TEXT_PANEL_PAD;
+        ty = y + TEXT_PANEL_PAD;
+        tw = w - 2 * TEXT_PANEL_PAD;
+        th = h - 2 * TEXT_PANEL_PAD;
+      }
+      if (block.type === "narrative") {
+        slide.addText(block.text, {
+          x: tx, y: ty, w: tw, h: th,
+          fontFace: BODY_FONT, fontSize: 12.5, color: SLATE, valign: "top", lineSpacingMultiple: 1.1,
+        });
+      } else {
+        slide.addText(
+          block.items.map((t) => ({
+            text: t,
+            options: { bullet: { characterCode: "2022" }, breakLine: true, paraSpaceAfter: panel ? 4 : 0 },
+          })),
+          { x: tx + 0.1, y: ty, w: tw - 0.1, h: th, fontFace: BODY_FONT, fontSize: 12, color: SLATE, valign: "top", lineSpacingMultiple: 1.1 }
+        );
+      }
       break;
-    case "bullets":
-      slide.addText(
-        block.items.map((t) => ({
-          text: t,
-          options: { bullet: { characterCode: "2022" }, breakLine: true },
-        })),
-        { x: x + 0.1, y, w: w - 0.1, h, fontFace: BODY_FONT, fontSize: 12, color: SLATE, valign: "top", lineSpacingMultiple: 1.1 }
-      );
-      break;
+    }
     case "photos":
       if (geo) await renderPhotos(slide, block.imageIds, x, w, y, geo, sessionDir, images);
       break;
@@ -881,6 +905,10 @@ async function renderRows(
     }
     const rightW = splitRightW(row);
     await renderBlock(slide, row.left, CONTENT_X, y, row.leftW, h, undefined, sessionDir, images, row.right.type === "table");
+    if (row.right.type === "photos") {
+      await renderBlock(slide, row.right, CONTENT_X + row.leftW + SPLIT_GUTTER, y, rightW, h, geo, sessionDir, images);
+      continue;
+    }
     await renderBlock(
       slide, row.right, CONTENT_X + row.leftW + SPLIT_GUTTER, y, rightW,
       // A table beside KPIs keeps its own height; a chart takes the band.
