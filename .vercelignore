@@ -1,0 +1,4 @@
+# Never upload local secrets or helper scripts with a CLI deploy.
+.env*
+/update.ps1
+/update-sila-app.ps1
