@@ -489,6 +489,23 @@ export default function Validator({
               Every figure was checked against what you submitted.
             </p>
 
+            {(deck.submitterWarnings ?? []).length > 0 && (
+              <div
+                className="mt-5 rounded-lg px-4 py-3 text-[13.5px] leading-relaxed"
+                style={{ background: "var(--wash)", borderLeft: "3px solid var(--sun)" }}
+              >
+                <p className="font-medium">Before you file, about your submission</p>
+                <ul className="mt-2 list-disc space-y-1 pl-5" style={{ color: "var(--muted)" }}>
+                  {(deck.submitterWarnings ?? []).map((w, n) => (
+                    <li key={n}>{w}</li>
+                  ))}
+                </ul>
+                <p className="mt-2" style={{ color: "var(--muted)" }}>
+                  This is for you only; it is not in the deck.
+                </p>
+              </div>
+            )}
+
             {(() => {
               const removed = (deck.grounding ?? []).filter((g) => g.action === "dropped");
               if (removed.length === 0) return null;

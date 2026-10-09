@@ -169,12 +169,17 @@ a dropped table, a vanished photo grid, an invisible logo, a deleted
 caught any other way.
 
 ```bash
-# render a generated deck and inspect it
-soffice --headless --convert-to pdf deck.pptx
-pdftoppm -jpeg -r 85 -f 1 -l 8 deck.pdf slide
+# once: the render image with the real deck fonts
+docker build -t mmr-render render/
+# render, contact sheets, and how full each slide is
+python render/bench.py deck.pptx out-dir
 ```
 
-Then actually view the images.
+Then actually view the images. Render only with `mmr-render`: the stock
+LibreOffice image substitutes Noto for Georgia and Calibri, about 10-15%
+wider, and a layout judged on it is judged on text PowerPoint never draws.
+The bench's fill figures catch emptiness only - Sattva's medians (vertical
+fill 0.97, ink 0.36) are the bar - so the slides are still looked at.
 
 - **Verify against real submissions, not fixtures.** The real files contain
   grouped shapes, duplicate embedded workbooks, portrait photographs and

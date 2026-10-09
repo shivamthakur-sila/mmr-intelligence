@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import sharp from "sharp";
 import { XMLParser } from "fast-xml-parser";
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" });
@@ -19,7 +20,29 @@ export type ExtractedImage = {
   ext: string;
   bytes: number;
   buffer: Buffer;
+  /** Pixel size as the photo is meant to be seen, after EXIF rotation. */
+  width: number;
+  height: number;
 };
+
+/**
+ * A photo the right way up, with its real size.
+ *
+ * A phone stores a portrait shot as landscape pixels plus an EXIF flag that
+ * says "rotate me". pptxgenjs embeds the pixels and ignores the flag, so the
+ * photo landed on its side in the deck while the browser preview, which
+ * honours the flag, showed it upright. Rotating once here, before the photo is
+ * stored, gives every later consumer the same upright pixels. A photo without
+ * the flag is returned byte for byte.
+ */
+export async function uprightImage(buffer: Buffer): Promise<{ buffer: Buffer; width: number; height: number }> {
+  const meta = await sharp(buffer).metadata();
+  const w = meta.width ?? 0;
+  const h = meta.height ?? 0;
+  if (!meta.orientation || meta.orientation === 1) return { buffer, width: w, height: h };
+  const { data, info } = await sharp(buffer).rotate().toBuffer({ resolveWithObject: true });
+  return { buffer: data, width: info.width, height: info.height };
+}
 
 function asArray<T>(v: T | T[] | undefined): T[] {
   if (v === undefined) return [];
@@ -57,13 +80,21 @@ export async function extractImages(
       if (imgBuffer.length < MIN_CONTENT_IMAGE_BYTES) continue;
 
       const ext = (mediaPath.match(USABLE_EXT)?.[0] ?? ".jpg").toLowerCase();
+      let upright: Awaited<ReturnType<typeof uprightImage>>;
+      try {
+        upright = await uprightImage(imgBuffer);
+      } catch {
+        continue; // not a decodable image, so not a usable photo
+      }
       out.push({
         id: `img${++counter}`,
         slideNumber,
         slideTitle: slideTitles.get(slideNumber) ?? "",
         ext: ext === ".jpeg" ? ".jpg" : ext,
-        bytes: imgBuffer.length,
-        buffer: imgBuffer,
+        bytes: upright.buffer.length,
+        buffer: upright.buffer,
+        width: upright.width,
+        height: upright.height,
       });
     }
   }

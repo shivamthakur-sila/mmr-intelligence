@@ -114,14 +114,16 @@ Each section becomes one slide, holding several blocks stacked in order:
   A chart and a table of the same figures belong together on a slide when the exact per-row values are also worth reading — chart first, table beneath it. Use a table alone only when the rows are not comparable numbers at all.
   Chart only figures the source states. Do not interpolate a missing month, estimate a bar to complete a trend, or compute a percentage the source does not give; leave a category out rather than filling it in.
 - {"type":"photos","imageIds":["img3","img4"]} — 2-6 ids from the manifest only. Choose photos whose source slide genuinely relates to this section.
-- {"type":"note","text":"..."} — a short caveat, rendered small and muted.
+- {"type":"note","text":"..."} — a short caveat for the client about what a figure covers, rendered small and muted.
+
+Notes, the headline and summary points are read by the client. Anything about the submission itself - that it is demo or sample data, carried over from an earlier month, missing a month, or contradicts itself - goes in "submitterWarnings" instead, never in a note, the headline or a summary point. The submitter sees those warnings before filing; the client never does.
 
 Also nominate a cover photograph as "coverImageId", choosing from the manifest the image that best represents the property as a whole - a building exterior, entrance, or lobby. Prefer a photo from a slide about the site itself over one from a maintenance or activity section; a photo of equipment or a work-in-progress makes a poor cover. Omit the field if nothing suitable exists.
 
 Also write an opening "at a glance" summary: one headline sentence and 3-5 of the month's most significant, specific facts with real figures.
 
 Respond with ONLY valid JSON, no fences:
-{"summary":{"headline":"...","points":["..."]},"coverImageId":"img3","sections":[{"key":"ppm","label":"PPM & Maintenance Schedule","blocks":[{"type":"kpis","items":[{"label":"Completed","value":"16 of 16"}]},{"type":"table","headers":["Location","Equipment"],"rows":[["10th Floor","LTG panel"]]}]}]}
+{"summary":{"headline":"...","points":["..."]},"submitterWarnings":["..."],"coverImageId":"img3","sections":[{"key":"ppm","label":"PPM & Maintenance Schedule","blocks":[{"type":"kpis","items":[{"label":"Completed","value":"16 of 16"}]},{"type":"table","headers":["Location","Equipment"],"rows":[["10th Floor","LTG panel"]]}]}]}
 Every section you include must have at least one block.`;
 }
 
@@ -149,6 +151,8 @@ export type CuratedDeck = {
   sections: CuratedSection[];
   /** Figures the grounding check removed or flagged. Not rendered; shown to the submitter. */
   grounding?: GroundingIssue[];
+  /** About the submission, not the site: shown to the submitter, never drawn in the deck. */
+  submitterWarnings?: string[];
 };
 
 async function callClaude(step: string, system: string, user: string, maxTokens: number): Promise<string> {
@@ -267,7 +271,10 @@ export function sanitiseBlocks(deck: CuratedDeck): CuratedDeck {
     return { ...section, blocks: out };
   });
 
-  return { ...deck, sections: sections.filter((s) => s.blocks.length > 0) };
+  const submitterWarnings = (Array.isArray(deck.submitterWarnings) ? deck.submitterWarnings : [])
+    .map((w) => String(w ?? "").trim())
+    .filter(Boolean);
+  return { ...deck, submitterWarnings, sections: sections.filter((s) => s.blocks.length > 0) };
 }
 
 /**

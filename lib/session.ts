@@ -4,7 +4,7 @@ import os from "os";
 import crypto from "crypto";
 import { createServiceClient } from "./supabase/service";
 import { TokenError } from "./resolve-token";
-import type { ExtractedImage } from "./parsing/images";
+import { uprightImage, type ExtractedImage } from "./parsing/images";
 
 export const SESSION_BUCKET = "mmr-uploads";
 
@@ -19,7 +19,15 @@ export const SESSION_BUCKET = "mmr-uploads";
  * embeds images from file paths rather than buffers.
  */
 
-export type ImageRecord = { id: string; file: string; slideNumber: number; slideTitle: string };
+export type ImageRecord = {
+  id: string;
+  file: string;
+  slideNumber: number;
+  slideTitle: string;
+  /** Upright pixel size. Absent on sessions stored before it was recorded. */
+  width?: number;
+  height?: number;
+};
 
 export type SessionData = {
   /** The site this session belongs to. Every later step checks it against the token. */
@@ -69,6 +77,8 @@ export async function saveSession(
       file: fileName,
       slideNumber: img.slideNumber,
       slideTitle: img.slideTitle,
+      width: img.width,
+      height: img.height,
     });
   }
 
@@ -151,9 +161,16 @@ export async function addUserImages(
     const ext = rawExt === ".jpeg" ? ".jpg" : rawExt;
     const imgId = `user${++counter}`;
     const fileName = `${imgId}${ext}`;
+    // Phone photos arrive with an EXIF rotation flag; see uprightImage.
+    let upright: Awaited<ReturnType<typeof uprightImage>>;
+    try {
+      upright = await uprightImage(f.buffer);
+    } catch {
+      continue; // not a decodable image
+    }
     const { error } = await supabase.storage
       .from(SESSION_BUCKET)
-      .upload(keyFor(id, fileName), f.buffer, {
+      .upload(keyFor(id, fileName), upright.buffer, {
         contentType: contentTypeFor(ext),
         upsert: true,
       });
@@ -163,6 +180,8 @@ export async function addUserImages(
       file: fileName,
       slideNumber: 0,
       slideTitle: "Provided by the site team",
+      width: upright.width,
+      height: upright.height,
     });
   }
 
