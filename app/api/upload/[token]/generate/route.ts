@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { assertOwnUpload, resolveToken, TokenError } from "@/lib/resolve-token";
 import { loadChecklist } from "@/lib/checklist";
@@ -5,7 +7,7 @@ import { curateDeck, sanitisePhotos } from "@/lib/curate";
 import { generateDeck } from "@/lib/generate-deck";
 import { deckOutline } from "@/lib/deck-layout";
 import { openSession, addUserImages, materializeImages, saveDeck } from "@/lib/session";
-import { extractXlsx } from "@/lib/parsing/xlsx";
+import { extractXlsx, workbookText } from "@/lib/parsing/xlsx";
 import { createServiceClient } from "@/lib/supabase/service";
 import { BUCKET } from "../signed-urls/route";
 
@@ -43,7 +45,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       if (error || !data) continue; // a missing attachment shouldn't sink the whole build
       const buffer = Buffer.from(await data.arrayBuffer());
       if (/\.xlsx$/i.test(f.name)) {
-        extraText.push(`=== Provided to fill a gap: ${f.name} ===\n${extractXlsx(buffer).summary}`);
+        extraText.push(`=== Provided to fill a gap: ${f.name} ===\n${workbookText(extractXlsx(buffer).sheets)}`);
       } else if (/\.(jpe?g|png)$/i.test(f.name)) {
         userPhotos.push({ name: f.name, buffer });
       }
@@ -55,12 +57,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     // Pull the session's photos down into this invocation's /tmp so the
     // deck builder can embed them from real file paths.
     const sessionDir = await materializeImages(sessionId, session.images);
+    // A photo whose download failed is not offered to the model at all.
+    // Otherwise the preview drew its tile while the deck silently left it
+    // out, and the submitter approved a grid the filed deck did not have.
+    const images = session.images.filter((i) => fs.existsSync(path.join(sessionDir, i.file)));
+    if (images.length < session.images.length) {
+      console.warn(`[generate] ${session.images.length - images.length} photo(s) could not be downloaded and were left out`);
+    }
     const checklist = await loadChecklist(resolved.siteId);
 
     const combined = [session.combinedText, ...extraText].join("\n\n");
     const manifest =
-      session.images.length > 0
-        ? session.images.map((i) => `- ${i.id}: from "${i.slideTitle || "site team upload"}"`).join("\n")
+      images.length > 0
+        ? images.map((i) => `- ${i.id}: from "${i.slideTitle || "site team upload"}"`).join("\n")
         : "(no photography available)";
 
     const curated = await curateDeck(
@@ -72,9 +81,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       typedAnswers
     );
     // Only photographs that exist reach the renderer and the preview alike.
-    const deck = sanitisePhotos(curated, session.images.map((i) => i.id));
+    const deck = sanitisePhotos(curated, images.map((i) => i.id));
 
-    const buf = await generateDeck(deck, sessionDir, session.images, resolved.siteName, resolved.reportMonth);
+    const buf = await generateDeck(deck, sessionDir, images, resolved.siteName, resolved.reportMonth);
 
     // Store the built deck in Storage - not on disk - so the download and
     // commit steps, which are separate invocations, can actually reach it.

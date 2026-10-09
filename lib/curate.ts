@@ -1,4 +1,5 @@
 import { groundDeck, type GroundingIssue } from "./grounding";
+import { CUT_SHORT } from "./parsing/xlsx";
 
 export type ChecklistItem = {
   key: string;
@@ -98,10 +99,10 @@ ${CORE_RULES}
 
 IMPORTANT — what to include: build the deck ONLY from parameters that have genuine content. Omit anything absent entirely. Do not emit a section, a placeholder, or a "not available" slide for missing data — a shorter deck of real substance is the goal, not a fixed structure with holes. Order the sections you do include by what matters most for this month rather than by the checklist order, and lead with what a client would most want to see.
 
-Chart what can be charted. Wherever a section's figures form a series — across months, across locations, across categories, or as parts of one total — give that section a chart block. A section of real series data shown only as a table reads as a data dump rather than a report. Chart only from data you have in full: a sheet marked "... N more rows not shown" has been cut short, so never count or total it.
+Chart what can be charted. Wherever a section's figures form a series — across months, across locations, across categories, or as parts of one total — give that section a chart block. A section of real series data shown only as a table reads as a data dump rather than a report. Chart only from data you have in full: a sheet ending "${CUT_SHORT}" has been cut short, so never count or total it.
 
 Each section becomes one slide, holding several blocks stacked in order:
-- {"type":"table","headers":[...],"rows":[[...]]} — real headers and rows exactly as in the source. At most 10 rows so it fits; if the source has more, choose the most representative and add a "note" block stating the true total.
+- {"type":"table","headers":[...],"rows":[[...]]} — real headers and rows exactly as in the source. At most 10 rows so it fits; if the source has more, choose the most representative and add a "note" block saying the table shows a selection. Give the source's total number of rows only where the source itself states it. Leave out any column that is empty in every row you show. A table has no "note" field - a caveat is always its own note block.
 - {"type":"table","headers":[...],"rows":[[...]],"groups":[{"label":"Housekeeping","afterRow":0},{"label":"Technical","afterRow":5}]} — a table with category band rows. Use whenever rows fall into natural groups (service line, location, floor); grouped tables read far better than flat ones.
 - {"type":"narrative","text":"..."} — 1-4 sentences, only what the source states.
 - {"type":"bullets","items":["..."]} — 2-6 short points.
@@ -150,28 +151,39 @@ export type CuratedDeck = {
   grounding?: GroundingIssue[];
 };
 
-async function callClaude(system: string, user: string, maxTokens: number): Promise<string> {
+async function callClaude(step: string, system: string, user: string, maxTokens: number): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY isn't set in this deployment.");
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({
-      model: "claude-sonnet-5",
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: "user", content: user }],
-    }),
-  });
+  // A dropped connection surfaces from fetch as a bare "fetch failed", which
+  // names neither the step nor the cause; both are added here.
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
+    });
+  } catch (e) {
+    const cause = (e as { cause?: { message?: string; code?: string } }).cause;
+    throw new Error(
+      `The ${step} request to Claude failed before any response arrived: ` +
+        `${(e as Error).message}${cause ? ` (${cause.code ?? cause.message})` : ""}`
+    );
+  }
 
-  if (!res.ok) throw new Error(`Claude API call failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw new Error(`Claude API call for ${step} failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
 
   const data = await res.json();
   const text = data.content?.find((b: { type: string }) => b.type === "text")?.text ?? "";
-  if (!text) throw new Error("Claude returned an empty response.");
+  if (!text) throw new Error(`Claude returned an empty response for ${step}.`);
   if (data.stop_reason === "max_tokens") {
-    throw new Error("Claude's response was cut off by the output limit before the JSON finished. Raise max_tokens in lib/curate.ts.");
+    throw new Error(`Claude's ${step} response was cut off by the output limit before the JSON finished. Raise max_tokens in lib/curate.ts.`);
   }
   return text;
 }
@@ -191,7 +203,7 @@ export async function validateSiteMonth(
   expectedMonth: string
 ): Promise<ValidationResult> {
   const user = `Expected site: ${expectedSite}\nExpected report month: ${expectedMonth}\n\n--- SUBMITTED CONTENT ---\n${combinedText}`;
-  return parseJson<ValidationResult>(await callClaude(VALIDATE_SYSTEM, user, 1500), "validation");
+  return parseJson<ValidationResult>(await callClaude("validation", VALIDATE_SYSTEM, user, 1500), "validation");
 }
 
 export async function reviewSubmission(
@@ -200,7 +212,7 @@ export async function reviewSubmission(
   items: ChecklistItem[]
 ): Promise<ReviewSection[]> {
   const user = `--- AVAILABLE PHOTOGRAPHY ---\n${imageManifest}\n\n--- EXTRACTED SOURCE CONTENT ---\n${combinedText}`;
-  return parseJson<{ sections: ReviewSection[] }>(await callClaude(reviewSystem(items), user, 8000), "review").sections;
+  return parseJson<{ sections: ReviewSection[] }>(await callClaude("review", reviewSystem(items), user, 8000), "review").sections;
 }
 
 /**
@@ -238,85 +250,170 @@ export function sanitiseBlocks(deck: CuratedDeck): CuratedDeck {
   const sections = deck.sections.map((section) => {
     const out: Block[] = [];
     for (const block of section.blocks) {
-      if (block.type === "kpis") {
-        // The renderer draws four cards a row; a fifth used to vanish. Split
-        // instead, so every figure the model chose is still shown.
-        const items = Array.isArray(block.items) ? block.items : [];
-        if (items.length > 4) {
-          console.warn(`[curate] kpis in section "${section.key}": split ${items.length} cards into rows of four`);
-        }
-        for (let i = 0; i < items.length; i += 4) out.push({ type: "kpis", items: items.slice(i, i + 4) });
+      // The model attaches a "note" to tables and charts although neither
+      // type has one, and nothing drew it: a real deck lost "AMC expired and
+      // renewal not done for Fire system" and the caveat that its electricity
+      // figures were from 2025. A note becomes its own block straight after,
+      // so it is drawn, previewed and checked like any other.
+      const attached = (block as { note?: unknown }).note;
+      if (block.type !== "note" && typeof attached === "string" && attached.trim()) {
+        // sanitiseBlock rebuilds each block from its known fields only.
+        sanitiseBlock(block, section.key, out);
+        out.push({ type: "note", text: attached.trim() });
         continue;
       }
-      if (block.type !== "chart") {
-        out.push(block);
-        continue;
-      }
-
-      const asTable = (why: string): Block | null => {
-        const cats = Array.isArray(block.categories) ? block.categories.map((c) => String(c ?? "")) : [];
-        const series = Array.isArray(block.series) ? block.series : [];
-        console.warn(`[curate] chart in section "${section.key}" shown as a table: ${why}`);
-        if (cats.length === 0 || series.length === 0) return null;
-        return {
-          type: "table",
-          headers: ["", ...series.map((s) => String(s?.name ?? ""))],
-          rows: cats.map((c, i) => [
-            c,
-            ...series.map((s) => (Array.isArray(s?.values) && s.values[i] != null ? String(s.values[i]) : "")),
-          ]),
-        };
-      };
-
-      const cats = Array.isArray(block.categories) ? block.categories.map((c) => String(c ?? "")) : [];
-      if (!Array.isArray(block.series) || block.series.length === 0) {
-        const t = asTable("no series");
-        if (t) out.push(t);
-        continue;
-      }
-      if (cats.length < 2 || cats.length > 12) {
-        const t = asTable(`${cats.length} categories, needs 2-12`);
-        if (t) out.push(t);
-        continue;
-      }
-
-      // A pie is parts of one whole; extra series are meaningless on it.
-      const max = block.chartType === "pie" ? 1 : 3;
-      if (block.series.length > max) {
-        console.warn(
-          `[curate] chart in section "${section.key}": kept ${max} of ${block.series.length} series, ` +
-            `dropped ${block.series.slice(max).map((s) => `"${s?.name}"`).join(", ")}`
-        );
-      }
-      const series = block.series.slice(0, max);
-
-      let problem: string | null = null;
-      const clean: { name: string; values: number[] }[] = [];
-      for (const s of series) {
-        if (!Array.isArray(s?.values) || s.values.length !== cats.length) {
-          problem = `series "${s?.name}" has ${s?.values?.length} values for ${cats.length} categories`;
-          break;
-        }
-        const values = s.values.map(chartValue);
-        const bad = values.findIndex((v) => v === null);
-        if (bad !== -1) {
-          problem = `series "${s?.name}" value ${JSON.stringify(s.values[bad])} is not a number`;
-          break;
-        }
-        clean.push({ name: String(s.name ?? ""), values: values as number[] });
-      }
-      if (problem) {
-        const t = asTable(problem);
-        if (t) out.push(t);
-        continue;
-      }
-      out.push({ ...block, categories: cats, series: clean });
+      sanitiseBlock(block, section.key, out);
     }
     return { ...section, blocks: out };
   });
 
   return { ...deck, sections: sections.filter((s) => s.blocks.length > 0) };
 }
+
+/**
+ * A table whose every row has exactly one cell per header, with no column
+ * that is empty in every row. A short row used to leave its last cells
+ * unfilled and a long one drew a broken table over the slide title; an empty
+ * column is a placeholder, and absent content is omitted, never shown.
+ */
+function sanitiseTable(block: Extract<Block, { type: "table" }>, key: string): Block | null {
+  const text = (v: unknown) => (v == null ? "" : String(v));
+  let headers = (Array.isArray(block.headers) ? block.headers : []).map(text);
+  let rows = (Array.isArray(block.rows) ? block.rows : [])
+    .filter(Array.isArray)
+    .map((r) => r.map(text));
+  const width = headers.length;
+  if (width === 0 || rows.length === 0) {
+    console.warn(`[curate] table in section "${key}" dropped: no headers or no rows`);
+    return null;
+  }
+  rows = rows.map((r) => {
+    if (r.length === width) return r;
+    if (r.length < width) return [...r, ...Array(width - r.length).fill("")];
+    // Cells past the last header are kept, in the last column, rather than lost.
+    console.warn(`[curate] table in section "${key}": a row had ${r.length} cells for ${width} headers`);
+    return [...r.slice(0, width - 1), r.slice(width - 1).filter((c) => c.trim()).join(" ")];
+  });
+
+  const used = headers.map((_, c) => rows.some((r) => r[c].trim() !== ""));
+  if (used.includes(false)) {
+    console.warn(
+      `[curate] table in section "${key}": removed empty column(s) ` +
+        headers.filter((_, c) => !used[c]).map((h) => `"${h}"`).join(", ")
+    );
+    headers = headers.filter((_, c) => used[c]);
+    rows = rows.map((r) => r.filter((_, c) => used[c]));
+  }
+  if (headers.length === 0) return null;
+
+  const groups = Array.isArray(block.groups)
+    ? block.groups
+        .filter((g) => g && typeof g.label === "string" && g.label.trim() && Number.isFinite(Number(g.afterRow)))
+        .map((g) => ({ label: g.label.trim(), afterRow: Math.min(rows.length, Math.max(0, Math.floor(Number(g.afterRow)))) }))
+    : undefined;
+  return { type: "table", headers, rows, ...(groups && groups.length > 0 ? { groups } : {}) };
+}
+
+/** One block, made drawable, appended to `out` - or nothing, if it cannot be. */
+function sanitiseBlock(block: Block, key: string, out: Block[]): void {
+  switch (block.type) {
+    case "table": {
+      const t = sanitiseTable(block, key);
+      if (t) out.push(t);
+      return;
+    }
+    case "kpis": {
+      // The renderer draws four cards a row; a fifth used to vanish. Split
+      // instead, so every figure the model chose is still shown.
+      const items = (Array.isArray(block.items) ? block.items : [])
+        .filter((k) => k && k.value != null && String(k.value).trim())
+        .map((k) => ({ label: String(k.label ?? ""), value: String(k.value) }));
+      if (items.length > 4) {
+        console.warn(`[curate] kpis in section "${key}": split ${items.length} cards into rows of four`);
+      }
+      for (let i = 0; i < items.length; i += 4) out.push({ type: "kpis", items: items.slice(i, i + 4) });
+      return;
+    }
+    case "bullets": {
+      const items = (Array.isArray(block.items) ? block.items : []).map((t) => String(t ?? "").trim()).filter(Boolean);
+      if (items.length > 0) out.push({ type: "bullets", items });
+      return;
+    }
+    case "narrative":
+    case "note": {
+      const text = typeof block.text === "string" ? block.text.trim() : "";
+      if (text) out.push({ type: block.type, text });
+      return;
+    }
+    case "chart":
+      sanitiseChart(block, key, out);
+      return;
+    default:
+      out.push(block);
+  }
+}
+
+function sanitiseChart(block: Extract<Block, { type: "chart" }>, key: string, out: Block[]): void {
+  // A unit is drawn as text, so anything else is either dropped or, for a
+  // number, made text; the renderer called .trim() on it and a numeric unit
+  // failed the build after the submitter had approved the preview.
+  let unit = typeof block.unit === "string" || typeof block.unit === "number" ? String(block.unit).trim() : "";
+  // chartValue strips a percent sign the model wrote into a value. The sign is
+  // part of the figure, so when the chart names no unit it becomes the unit
+  // rather than disappearing: 96% must not be drawn as a bare 96.
+  const series0 = Array.isArray(block.series) ? block.series : [];
+  if (!unit && series0.some((s) => Array.isArray(s?.values) && s.values.some((v) => typeof v === "string" && /%\s*$/.test(v)))) {
+    unit = "%";
+  }
+  const title = typeof block.title === "string" && block.title.trim() ? block.title.trim() : undefined;
+  const cats = Array.isArray(block.categories) ? block.categories.map((c) => String(c ?? "")) : [];
+
+  // Shown as a table, the chart keeps everything the reader needs to read
+  // its figures: the title over the label column, the unit beside each series.
+  const asTable = (why: string) => {
+    console.warn(`[curate] chart in section "${key}" shown as a table: ${why}`);
+    if (cats.length === 0 || series0.length === 0) return;
+    const head = (name: string) => (unit ? (name ? `${name} (${unit})` : unit) : name);
+    const t = sanitiseTable(
+      {
+        type: "table",
+        headers: [title ?? "", ...series0.map((s) => head(String(s?.name ?? "")))],
+        rows: cats.map((c, i) => [
+          c,
+          ...series0.map((s) => (Array.isArray(s?.values) && s.values[i] != null ? String(s.values[i]) : "")),
+        ]),
+      },
+      key
+    );
+    if (t) out.push(t);
+  };
+
+  if (!["bar", "line", "pie"].includes(block.chartType)) return asTable(`unknown chart type ${JSON.stringify(block.chartType)}`);
+  if (series0.length === 0) return asTable("no series");
+  if (cats.length < 2 || cats.length > 12) return asTable(`${cats.length} categories, needs 2-12`);
+
+  // A pie is parts of one whole; extra series are meaningless on it.
+  const max = block.chartType === "pie" ? 1 : 3;
+  if (series0.length > max) {
+    console.warn(
+      `[curate] chart in section "${key}": kept ${max} of ${series0.length} series, ` +
+        `dropped ${series0.slice(max).map((s) => `"${s?.name}"`).join(", ")}`
+    );
+  }
+
+  const clean: { name: string; values: number[] }[] = [];
+  for (const s of series0.slice(0, max)) {
+    if (!Array.isArray(s?.values) || s.values.length !== cats.length) {
+      return asTable(`series "${s?.name}" has ${s?.values?.length} values for ${cats.length} categories`);
+    }
+    const values = s.values.map(chartValue);
+    const bad = values.findIndex((v) => v === null);
+    if (bad !== -1) return asTable(`series "${s?.name}" value ${JSON.stringify(s.values[bad])} is not a number`);
+    clean.push({ name: String(s.name ?? ""), values: values as number[] });
+  }
+  out.push({ type: "chart", chartType: block.chartType, title, categories: cats, series: clean, unit: unit || undefined });
+}
+
 
 /**
  * Keeps only photographs that exist.
@@ -357,7 +454,7 @@ export async function curateDeck(
       ? userAnswers.map((a) => `- ${a.label}: ${a.answer}`).join("\n")
       : "(no gap answers were supplied)";
   const user = `Site: ${siteName}\nReport month: ${reportMonth}\n\n--- AVAILABLE PHOTOGRAPHY ---\n${imageManifest}\n\n--- ANSWERS SUPPLIED FOR GAPS ---\n${answers}\n\n--- EXTRACTED SOURCE CONTENT ---\n${combinedText}`;
-  const deck = sanitiseBlocks(parseJson<CuratedDeck>(await callClaude(curateSystem(items), user, 20000), "curation"));
+  const deck = sanitiseBlocks(parseJson<CuratedDeck>(await callClaude("curation", curateSystem(items), user, 20000), "curation"));
 
   // The submitter's typed answers are source material too: a figure they
   // supplied for a gap is theirs, not the model's.
