@@ -29,23 +29,107 @@ import {
 const FM_BLUE = "264170";
 const SUNSHINE = "F7A328";
 const SLATE = "2D2D2D";
+// The reference deck sets titles, cover type and the page number in charcoal.
+const CHARCOAL = "3C3C3B";
+// The small tab on the right edge of every content slide in the reference.
+const EDGE_TAB = "FFAF00";
 const MUTED = "697784";
 const HAIRLINE = "E5E5E4";
 const WHITE = "FFFFFF";
 
 // Brand fonts are Merriweather (headings) / Avenir Next (body). Neither is
-// reliably installed on a Windows machine, and a missing font renders as an
-// ugly substitute, so these are deliberate near-equivalents: Georgia is a
-// serif in the same register as Merriweather, Calibri a clean sans for body.
+// installed on a client's machine, pptxgenjs cannot embed fonts, and a missing
+// font renders as an ugly substitute. The reference deck (Sila x Sattva) uses
+// Georgia for titles and Trebuchet MS for body, both of which ship with every
+// copy of Windows, Office and macOS, so the deck reads the same everywhere.
 const HEAD_FONT = "Georgia";
-const BODY_FONT = "Calibri";
+const BODY_FONT = "Trebuchet MS";
 
 const SLIDE_W = 13.333;
 // Card height for a KPI row; deck-layout costs the block at the same figure.
 const KPI_H = 1.15;
 const CONTENT_X = 0.6;
 
-type ImageRecord = { id: string; file: string; slideNumber: number; slideTitle: string };
+type ImageRecord = {
+  id: string;
+  file: string;
+  slideNumber: number;
+  slideTitle: string;
+  width?: number;
+  height?: number;
+};
+
+// The cover, divider and closing photo panel of the reference deck: inset
+// under the 0.75in band, with white margins left, right and below.
+const PHOTO_PANEL = { x: 0.76, y: 0.75, w: 11.83, h: 6.0 };
+
+/** SILA's own black-and-white building, from the official PPT template. */
+function fallbackBuilding(): string {
+  const p = path.join(process.cwd(), "lib/assets", "bw-building.jpg");
+  if (!fs.existsSync(p)) {
+    throw new Error(`Fallback cover image missing: ${p}. lib/assets must ship with the deployment.`);
+  }
+  return p;
+}
+
+// Below about 110 pixels per placed inch a photo prints visibly soft. The
+// cover photo is drawn 11.83in wide, so it needs about 1,300 pixels across
+// after cropping to the panel; a 744px cover was blown up to fill it.
+const MIN_PANEL_PX = 1300;
+
+/** Pixels across a photo keeps once centre-cropped to the panel's ratio. */
+function croppedWidth(im: ImageRecord): number {
+  if (!im.width || !im.height) return 0;
+  const ratio = PHOTO_PANEL.w / PHOTO_PANEL.h;
+  return Math.min(im.width, im.height * ratio);
+}
+
+/**
+ * The site photograph for the cover and closing slides, or undefined when
+ * SILA's building stands in.
+ *
+ * Only the model's nomination is used: it chose knowing which slide each photo
+ * came from, so it can tell a building exterior from a plumber at work. When
+ * the nominated photo is too soft for the panel, the fallback is SILA's own
+ * building, never the "sharpest" other photo - on a real deck that rule put a
+ * pipe repair on the cover.
+ */
+/**
+ * A small black-and-white copy of the photo the cover and closing slides use,
+ * for the browser preview. Site photos are in private storage the browser
+ * cannot read, so without this the preview showed SILA's building even when
+ * the deck had the site's own photo - and the submitter approves the preview.
+ * Null when SILA's building is used; the preview has that one itself.
+ */
+export async function coverPreviewDataUrl(
+  deck: CuratedDeck,
+  images: ImageRecord[],
+  sessionDir: string
+): Promise<string | null> {
+  const photo = chooseCoverPhoto(deck, images, sessionDir);
+  if (!photo) return null;
+  try {
+    const jpeg = await sharp(path.join(sessionDir, photo.file))
+      .resize({ width: 640, height: Math.round(640 / (PHOTO_PANEL.w / PHOTO_PANEL.h)), fit: "cover", position: "centre" })
+      .grayscale()
+      .jpeg({ quality: 70 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+export function chooseCoverPhoto(
+  deck: CuratedDeck,
+  images: ImageRecord[],
+  sessionDir: string
+): ImageRecord | undefined {
+  const usable = images.filter(
+    (im) => fs.existsSync(path.join(sessionDir, im.file)) && croppedWidth(im) >= MIN_PANEL_PX
+  );
+  return usable.find((im) => im.id === deck.coverImageId);
+}
 
 
 /** Turns "2026-08" into "August 2026". Anything else passes through. */
@@ -77,47 +161,77 @@ function logo(white: boolean): string {
 }
 
 /**
- * Downscaled copy of the white logo, prepared once per build.
+ * Downscaled copies of both logos, prepared once per build.
  *
  * pptxgenjs embeds an image per addImage call rather than once per file, so the
  * full-size 180KB logo was stored 18 times - 3.3MB of one picture, more than
- * half the deck. It is only ever drawn 1.42in wide.
+ * half the deck. Neither is ever drawn more than 3in wide.
  */
-let preparedLogo: string | null = null;
+const preparedLogos: { white: string | null; color: string | null } = { white: null, color: null };
 async function prepareLogo(): Promise<void> {
-  const src = logo(true);
-  const out = path.join(os.tmpdir(), "sila-fm-logo-white-320.png");
-  try {
-    if (!fs.existsSync(out)) await sharp(src).resize({ width: 320 }).png().toFile(out);
-    preparedLogo = out;
-  } catch {
-    preparedLogo = null; // fall back to the full-size original
+  for (const white of [true, false]) {
+    const key = white ? "white" : "color";
+    const out = path.join(os.tmpdir(), `sila-fm-logo-${key}-480.png`);
+    try {
+      if (!fs.existsSync(out)) await sharp(logo(white)).resize({ width: 480 }).png().toFile(out);
+      preparedLogos[key] = out;
+    } catch {
+      preparedLogos[key] = null; // fall back to the full-size original
+    }
   }
 }
-function brandLogo(): string {
-  return preparedLogo ?? logo(true);
+function brandLogo(white = true): string {
+  return preparedLogos[white ? "white" : "color"] ?? logo(white);
+}
+
+// Logo aspect ratios (width / height) of the files in lib/assets, so a logo is
+// placed at its own proportions and never stretched.
+const COLOR_LOGO_RATIO = 1545 / 657;
+
+// The page furniture of the reference deck, scaled from its 20in page to
+// pptxgenjs's 13.333in WIDE layout (factor 0.667) and measured off the PDF:
+// a 0.75in navy band, an orange page square flush in the bottom-right corner
+// with the number in charcoal, the colour logo on white under the band, and a
+// small orange tab on the right edge.
+const BAND_H = 0.75;
+const PAGE_SQ = 0.747;
+const TITLE_RULE_Y = 1.7;
+
+/** The page-number square, shared by every slide that has one. */
+function pageSquare(slide: pptxgen.Slide, pageNum: number) {
+  const x = SLIDE_W - PAGE_SQ;
+  const y = 7.5 - PAGE_SQ;
+  slide.addShape("rect", { x, y, w: PAGE_SQ, h: PAGE_SQ, fill: { color: SUNSHINE }, line: { type: "none" } });
+  slide.addText(String(pageNum).padStart(2, "0"), {
+    x, y, w: PAGE_SQ, h: PAGE_SQ, align: "center", valign: "middle", margin: 0,
+    fontFace: BODY_FONT, fontSize: 12, bold: true, color: CHARCOAL,
+  });
+}
+
+function band(slide: pptxgen.Slide) {
+  slide.addShape("rect", { x: 0, y: 0, w: SLIDE_W, h: BAND_H, fill: { color: FM_BLUE }, line: { type: "none" } });
 }
 
 function chrome(slide: pptxgen.Slide, title: string, pageNum: number) {
   slide.background = { color: WHITE };
-  slide.addShape("rect", { x: 0, y: 0, w: SLIDE_W, h: 0.65, fill: { color: FM_BLUE }, line: { type: "none" } });
+  band(slide);
 
-  slide.addImage({ path: brandLogo(), x: 11.62, y: 0.13, w: 1.42, h: 0.4 });
+  // The colour logo sits on white under the band, top-right. The white logo
+  // inside the band read as a small mark; this is the reference's placement.
+  const logoW = 1.4;
+  slide.addImage({ path: brandLogo(false), x: SLIDE_W - 0.25 - logoW, y: 0.9, w: logoW, h: logoW / COLOR_LOGO_RATIO });
 
-  // Set at the scale the house decks use. At 26pt the heading read as a
-  // caption rather than a title and left the slide looking unanchored; the
-  // reference decks run their titles around twice the body size again.
+  // Georgia at about three times the body size, as the reference sets it, in
+  // charcoal; the fixed-length orange rule under it does not follow the
+  // title's length.
   slide.addText(title, {
-    x: CONTENT_X, y: 0.74, w: 10.4, h: 0.72,
-    fontFace: HEAD_FONT, fontSize: 34, color: SLATE, valign: "middle",
+    x: CONTENT_X, y: 0.92, w: SLIDE_W - CONTENT_X - logoW - 0.6, h: 0.66,
+    fontFace: HEAD_FONT, fontSize: 32, color: CHARCOAL, valign: "middle", fit: "shrink",
   });
-  slide.addShape("rect", { x: CONTENT_X, y: 1.52, w: 1.5, h: 0.05, fill: { color: SUNSHINE }, line: { type: "none" } });
+  slide.addShape("rect", { x: CONTENT_X + 0.1, y: TITLE_RULE_Y, w: 1.11, h: 0.04, fill: { color: SUNSHINE }, line: { type: "none" } });
 
-  slide.addShape("rect", { x: 12.52, y: 6.92, w: 0.58, h: 0.42, fill: { color: SUNSHINE }, line: { type: "none" } });
-  slide.addText(String(pageNum), {
-    x: 12.52, y: 6.92, w: 0.58, h: 0.42, align: "center", valign: "middle",
-    fontFace: BODY_FONT, fontSize: 12, bold: true, color: WHITE,
-  });
+  slide.addShape("rect", { x: SLIDE_W - 0.107, y: 3.667, w: 0.107, h: 0.667, fill: { color: EDGE_TAB }, line: { type: "none" } });
+  pageSquare(slide, pageNum);
 }
 
 /** One line of the contents list: orange tick bar, then the section name. */
@@ -381,14 +495,27 @@ function renderTable(
  * through every combination - only a box matching the image's own ratio
  * came out undistorted. So the image is made to match the box instead.
  */
+/**
+ * Where derived copies of an image go. Session photos are already in this
+ * invocation's temp folder; a bundled asset is not, and the deployment's own
+ * folder is read-only on Vercel, so its copies go to the temp folder too.
+ */
+function workDirFor(srcPath: string): string {
+  const tmp = path.resolve(os.tmpdir());
+  return path.resolve(srcPath).startsWith(tmp) ? path.dirname(srcPath) : tmp;
+}
+
 async function cropToRatio(srcPath: string, ratio: number, tag: string): Promise<string> {
-  const dir = path.dirname(srcPath);
-  const out = path.join(dir, `crop-${tag}-${path.basename(srcPath)}`);
+  const out = path.join(workDirFor(srcPath), `crop-${tag}-${path.basename(srcPath)}`);
   if (fs.existsSync(out)) return out;
   try {
-    const width = 1400;
+    // Never enlarged: a small photo blown up to 1400px only looked sharper
+    // in the file size. It is cropped at its own resolution, capped at 1600px.
+    const meta = await sharp(srcPath).metadata();
+    const croppable = Math.min(meta.width ?? 1600, (meta.height ?? 1600) * ratio);
+    const width = Math.max(1, Math.round(Math.min(1600, croppable)));
     await sharp(srcPath)
-      .resize({ width, height: Math.round(width / ratio), fit: "cover", position: "centre" })
+      .resize({ width, height: Math.max(1, Math.round(width / ratio)), fit: "cover", position: "centre" })
       .jpeg({ quality: 82 })
       .toFile(out);
     return out;
@@ -400,7 +527,7 @@ async function cropToRatio(srcPath: string, ratio: number, tag: string): Promise
 /** Black-and-white copy of an image, for the closing slide. Falls back to the
  *  original rather than losing the photograph if conversion fails. */
 async function toGrayscale(srcPath: string): Promise<string> {
-  const out = path.join(path.dirname(srcPath), `bw-${path.basename(srcPath)}`);
+  const out = path.join(workDirFor(srcPath), `bw-${path.basename(srcPath)}`);
   if (fs.existsSync(out)) return out;
   try {
     await sharp(srcPath).grayscale().jpeg({ quality: 82 }).toFile(out);
@@ -640,59 +767,56 @@ export async function generateDeck(
   pres.layout = "WIDE";
 
   // ---- Cover ----
+  // The reference cover: a black-and-white photograph inset under the band,
+  // with the orange block and the navy name strip over its top-left corner
+  // and the colour logo on the photograph's pale upper edge. The site's own
+  // photo is used when it is sharp enough for the panel; otherwise SILA's
+  // building from the official template, rather than a blurred enlargement
+  // or a white panel.
+  const coverPhoto = chooseCoverPhoto(deck, images, sessionDir);
+  const panelPhoto = await toGrayscale(
+    await cropToRatio(
+      coverPhoto ? path.join(sessionDir, coverPhoto.file) : fallbackBuilding(),
+      PHOTO_PANEL.w / PHOTO_PANEL.h,
+      "panel"
+    )
+  );
+
   const cover = pres.addSlide();
   cover.background = { color: WHITE };
-  cover.addShape("rect", { x: 0, y: 0, w: SLIDE_W, h: 0.65, fill: { color: FM_BLUE }, line: { type: "none" } });
-
-  // Right ~60%: full-bleed photo. Claude nominates one (it knows which
-  // source slide each came from, so it can tell a building exterior from
-  // a photo of a battery rack); largest file is only the fallback, and it
-  // picked badly often enough to be worth replacing.
-  const nominated = deck.coverImageId
-    ? images.find((im) => im.id === deck.coverImageId)
-    : undefined;
-  const coverPhoto =
-    (nominated && fs.existsSync(path.join(sessionDir, nominated.file)) ? nominated : undefined) ??
-    [...images]
-      .filter((im) => fs.existsSync(path.join(sessionDir, im.file)))
-      .sort(
-        (a, b) =>
-          fs.statSync(path.join(sessionDir, b.file)).size -
-          fs.statSync(path.join(sessionDir, a.file)).size
-      )[0];
-
-  if (coverPhoto) {
-    const w = SLIDE_W - 5.3;
-    const h = 6.85;
-    // Cropped to the panel's ratio for the same reason as the grid tiles:
-    // a mismatched box stretches the image rather than cropping it.
-    const cropped = await cropToRatio(path.join(sessionDir, coverPhoto.file), w / h, "cover");
-    cover.addImage({ path: cropped, x: 5.3, y: 0.65, w, h });
+  band(cover);
+  cover.addImage({ path: panelPhoto, ...PHOTO_PANEL });
+  // From just inside the band, so no hairline of photo shows between them.
+  cover.addShape("rect", { x: 0, y: 0.74, w: 5.63, h: 3.01, fill: { color: SUNSHINE }, line: { type: "none" } });
+  cover.addShape("rect", { x: 0.76, y: 3.01, w: 4.87, h: 0.74, fill: { color: FM_BLUE }, line: { type: "none" } });
+  {
+    // The colour logo on the photograph's upper edge. SILA's building has a
+    // pale sky there; a site photo can be dark anywhere, so it gets a white
+    // plate to keep the logo legible.
+    const w = 1.9;
+    const h = w / COLOR_LOGO_RATIO;
+    if (coverPhoto) {
+      cover.addShape("rect", { x: 5.63, y: 0.75, w: w + 0.3, h: h + 0.3, fill: { color: WHITE }, line: { type: "none" } });
+    }
+    cover.addImage({ path: brandLogo(false), x: 5.78, y: 0.9, w, h });
   }
-
-  cover.addShape("rect", { x: 0, y: 0.65, w: 5.3, h: 6.85, fill: { color: SUNSHINE }, line: { type: "none" } });
-  cover.addShape("rect", { x: 0, y: 3.15, w: 5.3, h: 1.5, fill: { color: FM_BLUE }, line: { type: "none" } });
-
   cover.addText("MONTHLY MANAGEMENT REPORT", {
-    x: 0.45, y: 1.5, w: 4.5, h: 0.5,
-    fontFace: BODY_FONT, fontSize: 13, color: SLATE, charSpacing: 3, bold: true,
+    x: 0.76, y: 2.35, w: 4.8, h: 0.4, margin: 0,
+    fontFace: BODY_FONT, fontSize: 12, color: CHARCOAL, charSpacing: 4,
   });
   cover.addText(siteName, {
-    x: 0.45, y: 3.3, w: 4.5, h: 1.2,
-    fontFace: HEAD_FONT, fontSize: 30, color: WHITE, valign: "middle",
-  });
-  cover.addText(prettyMonth(reportMonth), {
-    x: 0.45, y: 4.85, w: 4.5, h: 0.4,
-    fontFace: BODY_FONT, fontSize: 14, color: SLATE,
+    x: 0.96, y: 3.01, w: 2.9, h: 0.74, margin: 0, valign: "middle", fit: "shrink",
+    fontFace: HEAD_FONT, fontSize: 18, bold: true, color: WHITE, charSpacing: 2,
   });
   cover.addText("www.silagroup.co.in", {
-    x: 0.45, y: 6.65, w: 4.5, h: 0.35,
-    fontFace: BODY_FONT, fontSize: 11, color: SLATE,
+    x: 3.85, y: 3.01, w: 1.65, h: 0.74, margin: 0, valign: "middle", align: "right",
+    fontFace: BODY_FONT, fontSize: 9.5, color: WHITE, underline: { style: "sng" },
   });
-
-  // In the header bar rather than over the photo: a white logo on a light
-  // photo was unreadable, and the photo's brightness can't be predicted.
-  cover.addImage({ path: brandLogo(), x: 11.62, y: 0.13, w: 1.42, h: 0.4 });
+  cover.addText(prettyMonth(reportMonth), {
+    x: 0.76, y: 1.2, w: 4.8, h: 0.5, margin: 0,
+    fontFace: HEAD_FONT, fontSize: 20, color: CHARCOAL,
+  });
+  pageSquare(cover, 1);
 
   // ---- At a glance ----
   let pageNum = 2;
@@ -702,9 +826,9 @@ export async function generateDeck(
     x: CONTENT_X, y: CONTENT_TOP, w: CONTENT_W, h: 0.85,
     fontFace: HEAD_FONT, fontSize: 17, color: FM_BLUE, valign: "top",
   });
-  glance.addShape("rect", { x: CONTENT_X, y: 2.85, w: CONTENT_W, h: 0.02, fill: { color: HAIRLINE }, line: { type: "none" } });
+  glance.addShape("rect", { x: CONTENT_X, y: CONTENT_TOP + 0.95, w: CONTENT_W, h: 0.02, fill: { color: HAIRLINE }, line: { type: "none" } });
   deck.summary.points.slice(0, 5).forEach((pt, i) => {
-    const y = 3.1 + i * 0.62;
+    const y = CONTENT_TOP + 1.2 + i * 0.62;
     glance.addShape("rect", { x: CONTENT_X, y: y + 0.08, w: 0.09, h: 0.32, fill: { color: SUNSHINE }, line: { type: "none" } });
     glance.addText(pt, {
       x: CONTENT_X + 0.28, y, w: CONTENT_W - 0.28, h: 0.5,
@@ -744,38 +868,36 @@ export async function generateDeck(
   }
 
   // ---- Thank you ----
-  // Required by the brand guide and present in every house deck: a full-bleed
-  // photograph with an orange band across it carrying the sign-off. The photo
-  // is a second site image where one exists, so the deck closes on the
-  // property rather than on a blank panel.
+  // The reference closing slide: the same black-and-white photograph as the
+  // cover, the white logo on it top-right, an orange block bottom-left with
+  // the sign-off, and the navy strip carrying the web address. Bookending
+  // with the cover photo is deliberate: it is the shot chosen to show the
+  // property, not "some other photo".
   const closing = pres.addSlide();
   closing.background = { color: WHITE };
-  closing.addShape("rect", { x: 0, y: 0, w: SLIDE_W, h: 0.65, fill: { color: FM_BLUE }, line: { type: "none" } });
-
-  // The cover photograph again, in black and white, bookending the deck the
-  // way the house decks do. Deliberately not "some other photo": Claude picks
-  // the cover knowing which slide each image came from, so it is the one shot
-  // established to show the property. Choosing by file size instead landed on
-  // a before/after composite with "After" captioned across it.
-  const closingPhoto = coverPhoto;
-  if (closingPhoto) {
-    const w = SLIDE_W - 1.6;
-    const h = 5.6;
-    const cropped = await cropToRatio(path.join(sessionDir, closingPhoto.file), w / h, "closing");
-    closing.addImage({ path: await toGrayscale(cropped), x: 0.8, y: 0.65, w, h });
+  band(closing);
+  closing.addImage({ path: panelPhoto, ...PHOTO_PANEL });
+  {
+    // The reference puts the white logo on a dark part of its photo. Where the
+    // photo is not known to be dark there, the colour logo is the one that
+    // reads: on SILA's building the white one vanished into the sky.
+    const w = 2.0;
+    if (coverPhoto) {
+      closing.addShape("rect", { x: 12.55 - w - 0.15, y: 0.75, w: w + 0.3, h: w / COLOR_LOGO_RATIO + 0.3, fill: { color: WHITE }, line: { type: "none" } });
+    }
+    closing.addImage({ path: brandLogo(false), x: 12.55 - w, y: 0.9, w, h: w / COLOR_LOGO_RATIO });
   }
-
-  closing.addShape("rect", { x: 0, y: 3.55, w: 7.4, h: 1.75, fill: { color: SUNSHINE }, line: { type: "none" } });
+  closing.addShape("rect", { x: 0, y: 4.5, w: 5.93, h: 2.27, fill: { color: SUNSHINE }, line: { type: "none" } });
   closing.addText("THANK YOU", {
-    x: 0.8, y: 3.55, w: 6.2, h: 1.75,
-    fontFace: HEAD_FONT, fontSize: 40, color: SLATE, charSpacing: 4, valign: "middle",
+    x: 0.76, y: 4.5, w: 5.0, h: 2.27, margin: 0, valign: "middle",
+    fontFace: HEAD_FONT, fontSize: 36, color: CHARCOAL, charSpacing: 6,
   });
-  closing.addShape("rect", { x: 0, y: 6.6, w: 6.2, h: 0.9, fill: { color: FM_BLUE }, line: { type: "none" } });
+  closing.addShape("rect", { x: 0.76, y: 6.77, w: 5.17, h: 0.73, fill: { color: FM_BLUE }, line: { type: "none" } });
   closing.addText("www.silagroup.co.in", {
-    x: 0.8, y: 6.6, w: 5, h: 0.9,
-    fontFace: BODY_FONT, fontSize: 13, color: WHITE, valign: "middle",
+    x: 0.76, y: 6.77, w: 5.17, h: 0.73, margin: 0, align: "center", valign: "middle",
+    fontFace: BODY_FONT, fontSize: 10.5, color: WHITE,
   });
-  closing.addImage({ path: brandLogo(), x: 11.62, y: 0.13, w: 1.42, h: 0.4 });
+  pageSquare(closing, pageNum);
 
   const buf = await pres.write({ outputType: "nodebuffer" });
   return buf as Buffer;

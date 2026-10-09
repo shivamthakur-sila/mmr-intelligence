@@ -55,6 +55,7 @@ export default function Validator({
 
   const [deck, setDeck] = useState<CuratedDeck | null>(null);
   const [slideCount, setSlideCount] = useState(0);
+  const [coverPreview, setCoverPreview] = useState<string | null>(null);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
   const [tokenWarning, setTokenWarning] = useState<string | null>(null);
 
@@ -145,6 +146,7 @@ export default function Validator({
       }
       setDeck(data.deck);
       setSlideCount(data.slideCount);
+      setCoverPreview(data.coverPreview ?? null);
       setStep("preview");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't reach the server.");
@@ -533,7 +535,7 @@ export default function Validator({
             })()}
 
             <div className="mt-8">
-              <DeckPreview deck={deck} siteName={siteName} reportMonth={reportMonth} />
+              <DeckPreview deck={deck} siteName={siteName} reportMonth={reportMonth} coverImage={coverPreview} />
             </div>
 
             {error && <ErrorNote text={error} />}

@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { assertOwnUpload, resolveToken, TokenError } from "@/lib/resolve-token";
 import { loadChecklist } from "@/lib/checklist";
 import { curateDeck, sanitisePhotos } from "@/lib/curate";
-import { generateDeck } from "@/lib/generate-deck";
+import { coverPreviewDataUrl, generateDeck } from "@/lib/generate-deck";
 import { deckOutline } from "@/lib/deck-layout";
 import { openSession, addUserImages, materializeImages, saveDeck } from "@/lib/session";
 import { extractXlsx, workbookText } from "@/lib/parsing/xlsx";
@@ -97,6 +97,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       // deck gained continuation, contents and closing slides.
       slideCount: deckOutline(deck.sections).length,
       sizeKb: Math.round(buf.length / 1024),
+      coverPreview: await coverPreviewDataUrl(deck, images, sessionDir),
     });
   } catch (err) {
     if (err instanceof TokenError) {

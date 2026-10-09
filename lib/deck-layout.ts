@@ -16,8 +16,8 @@ import type { Block } from "./curate";
 
 // Geometry of the content area, shared with the renderer.
 export const CONTENT_W = 12.13;
-export const CONTENT_TOP = 1.78;
-export const CONTENT_BOTTOM = 6.85;
+export const CONTENT_TOP = 1.95;
+export const CONTENT_BOTTOM = 6.7;
 export const CONTENT_H = CONTENT_BOTTOM - CONTENT_TOP;
 
 // A chart below about an inch and a half has colliding axis labels; above

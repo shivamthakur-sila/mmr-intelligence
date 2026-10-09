@@ -16,16 +16,22 @@ export default function DeckPreview({
   deck,
   siteName,
   reportMonth,
+  coverImage = null,
+  initialSlide = 0,
 }: {
   deck: CuratedDeck;
   siteName: string;
   reportMonth: string;
+  /** The site photo the deck's cover uses, or null for SILA's building. */
+  coverImage?: string | null;
+  /** The slide shown first; 0, the cover, unless a caller needs another. */
+  initialSlide?: number;
 }) {
   // The same outline the .pptx is built to and the generate route counts, so
   // the deck the submitter approves is the deck that gets filed - contents and
   // closing slides, and every continuation slide a long section spills onto.
   const slides: OutlineSlide[] = deckOutline(deck.sections);
-  const [index, setI] = useState(0);
+  const [index, setI] = useState(initialSlide);
   // Clamped: a regenerated deck can be shorter than the slide being viewed.
   const i = Math.min(index, slides.length - 1);
   const current = slides[i];
@@ -36,11 +42,11 @@ export default function DeckPreview({
         className="relative w-full overflow-hidden rounded-lg"
         style={{ aspectRatio: "16 / 9", background: "#fff", border: "1px solid var(--hairline)" }}
       >
-        {current.kind === "cover" && <CoverSlide siteName={siteName} reportMonth={reportMonth} />}
-        {current.kind === "glance" && <GlanceSlide summary={deck.summary} />}
-        {current.kind === "contents" && <ContentsSlide labels={current.labels} reportMonth={reportMonth} />}
-        {current.kind === "section" && <SectionSlide page={current} />}
-        {current.kind === "closing" && <ClosingSlide />}
+        {current.kind === "cover" && <CoverSlide siteName={siteName} reportMonth={reportMonth} photo={coverImage} />}
+        {current.kind === "glance" && <GlanceSlide summary={deck.summary} page={i + 1} />}
+        {current.kind === "contents" && <ContentsSlide labels={current.labels} reportMonth={reportMonth} page={i + 1} />}
+        {current.kind === "section" && <SectionSlide page={current} pageNumber={i + 1} />}
+        {current.kind === "closing" && <ClosingSlide page={i + 1} photo={coverImage} />}
       </div>
 
       <div className="mt-3 flex items-center justify-between">
@@ -83,53 +89,139 @@ export default function DeckPreview({
   );
 }
 
-function Chrome({ title, children }: { title: string; children: React.ReactNode }) {
+// Slide geometry in the renderer's inches (13.333 x 7.5), placed by
+// percentage so the preview scales with its box. Shared by the chrome, the
+// cover and the closing slide, which mirror lib/generate-deck.ts.
+const X = (inches: number) => `${(inches / 13.333) * 100}%`;
+const Y = (inches: number) => `${(inches / 7.5) * 100}%`;
+const box = (x: number, y: number, w: number, h: number): React.CSSProperties => ({
+  position: "absolute",
+  left: X(x),
+  top: Y(y),
+  width: X(w),
+  height: Y(h),
+});
+const CHARCOAL = "#3C3C3B";
+
+function Band() {
+  return <div style={{ ...box(0, 0, 13.333, 0.75), background: "var(--blue)" }} />;
+}
+
+function PageSquare({ n }: { n: number }) {
   return (
-    <div className="absolute inset-0 flex flex-col">
-      <div style={{ height: "8.6%", background: "var(--blue)" }} />
-      <div className="flex min-h-0 flex-1 flex-col px-[4.5%] pt-[2.5%]">
-        <p style={{ fontFamily: "var(--serif)", fontSize: "clamp(13px, 2.4vw, 22px)" }}>{title}</p>
-        <div style={{ width: "10%", height: 3, background: "var(--sun)", marginTop: "0.8%" }} />
-        <div className="mt-[2.2%] min-h-0 flex-1 overflow-hidden">{children}</div>
-      </div>
+    <div
+      className="flex items-center justify-center font-semibold"
+      style={{ ...box(12.586, 6.753, 0.747, 0.747), background: "var(--sun)", color: CHARCOAL, fontSize: "clamp(6px, 0.9vw, 11px)" }}
+    >
+      {String(n).padStart(2, "0")}
     </div>
   );
 }
 
-function CoverSlide({ siteName, reportMonth }: { siteName: string; reportMonth: string }) {
+function Chrome({ title, page, children }: { title: string; page: number; children: React.ReactNode }) {
   return (
-    <div className="absolute inset-0 flex flex-col">
-      <div style={{ height: "8.6%", background: "var(--blue)" }} />
-      <div className="flex min-h-0 flex-1">
-        <div className="flex w-[40%] flex-col justify-center px-[4%]" style={{ background: "var(--sun)" }}>
-          <p
-            className="font-semibold"
-            style={{ fontSize: "clamp(7px, 1.05vw, 11px)", letterSpacing: "0.18em" }}
-          >
-            MONTHLY MANAGEMENT REPORT
-          </p>
-          <div className="mt-[8%] px-[6%] py-[6%]" style={{ background: "var(--blue)", marginLeft: "-6%", marginRight: "-6%" }}>
-            <p style={{ fontFamily: "var(--serif)", fontSize: "clamp(14px, 2.6vw, 26px)", color: "#fff" }}>
-              {siteName}
-            </p>
-          </div>
-          <p className="mt-[6%]" style={{ fontSize: "clamp(8px, 1.2vw, 13px)" }}>
-            {reportMonth}
-          </p>
-        </div>
-        <div className="flex flex-1 items-center justify-center" style={{ background: "var(--wash)" }}>
-          <p className="px-6 text-center text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
-            The site photograph appears here in the .pptx
-          </p>
-        </div>
+    <div className="absolute inset-0">
+      <Band />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/sila-fm-logo-color.png" alt="SILA" style={{ ...box(11.683, 0.9, 1.4, 0.595), objectFit: "contain" }} />
+      <p
+        className="flex items-center overflow-hidden whitespace-nowrap"
+        style={{ ...box(0.7, 0.92, 10.6, 0.66), fontFamily: "var(--serif)", color: CHARCOAL, fontSize: "clamp(13px, 2.3vw, 30px)" }}
+      >
+        {title}
+      </p>
+      <div style={{ ...box(0.7, 1.7, 1.11, 0.04), background: "var(--sun)" }} />
+      <div style={{ ...box(13.226, 3.667, 0.107, 0.667), background: "#FFAF00" }} />
+      <div className="flex flex-col overflow-hidden" style={box(0.6, 1.95, 12.13, 4.75)}>
+        {children}
       </div>
+      <PageSquare n={page} />
     </div>
   );
 }
 
-function GlanceSlide({ summary }: { summary: CuratedDeck["summary"] }) {
+/** The cover and closing photo: the site's when it is sharp enough, else SILA's building. */
+function PanelPhoto({ photo }: { photo: string | null }) {
   return (
-    <Chrome title="This Month at a Glance">
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={photo ?? "/bw-building.jpg"} alt="" style={{ ...box(0.76, 0.75, 11.83, 6.0), objectFit: "cover", filter: "grayscale(1)" }} />
+  );
+}
+
+/** Behind the logo when a site photo is used, as the deck does. */
+function LogoPlate({ x, y, w, h }: { x: number; y: number; w: number; h: number }) {
+  return <div style={{ ...box(x, y, w, h), background: "#fff" }} />;
+}
+
+function CoverSlide({ siteName, reportMonth, photo }: { siteName: string; reportMonth: string; photo: string | null }) {
+  return (
+    <div className="absolute inset-0">
+      <Band />
+      <PanelPhoto photo={photo} />
+      {photo && <LogoPlate x={5.63} y={0.75} w={2.2} h={1.108} />}
+      <div style={{ ...box(0, 0.74, 5.63, 3.01), background: "var(--sun)" }} />
+      <div style={{ ...box(0.76, 3.01, 4.87, 0.74), background: "var(--blue)" }} />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/sila-fm-logo-color.png" alt="SILA" style={{ ...box(5.78, 0.9, 1.9, 0.808), objectFit: "contain" }} />
+      <p style={{ ...box(0.76, 1.2, 4.8, 0.5), fontFamily: "var(--serif)", color: CHARCOAL, fontSize: "clamp(9px, 1.4vw, 20px)" }}>
+        {prettyMonth(reportMonth)}
+      </p>
+      <p style={{ ...box(0.76, 2.35, 4.8, 0.4), color: CHARCOAL, letterSpacing: "0.3em", fontSize: "clamp(5px, 0.8vw, 12px)" }}>
+        MONTHLY MANAGEMENT REPORT
+      </p>
+      <p
+        className="flex items-center overflow-hidden whitespace-nowrap font-bold"
+        style={{ ...box(0.96, 3.01, 2.9, 0.74), fontFamily: "var(--serif)", color: "#fff", letterSpacing: "0.12em", fontSize: "clamp(8px, 1.25vw, 18px)" }}
+      >
+        {siteName}
+      </p>
+      <p
+        className="flex items-center justify-end underline"
+        style={{ ...box(3.85, 3.01, 1.65, 0.74), color: "#fff", fontSize: "clamp(4.5px, 0.65vw, 9.5px)" }}
+      >
+        www.silagroup.co.in
+      </p>
+      <PageSquare n={1} />
+    </div>
+  );
+}
+
+function ClosingSlide({ page, photo }: { page: number; photo: string | null }) {
+  return (
+    <div className="absolute inset-0">
+      <Band />
+      <PanelPhoto photo={photo} />
+      {photo && <LogoPlate x={10.4} y={0.75} w={2.3} h={1.15} />}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/sila-fm-logo-color.png" alt="SILA" style={{ ...box(10.55, 0.9, 2.0, 0.85), objectFit: "contain" }} />
+      <div className="flex items-center" style={{ ...box(0, 4.5, 5.93, 2.27), background: "var(--sun)", paddingLeft: X(0.76) }}>
+        <p style={{ fontFamily: "var(--serif)", color: CHARCOAL, letterSpacing: "0.15em", fontSize: "clamp(12px, 2.5vw, 36px)" }}>
+          THANK YOU
+        </p>
+      </div>
+      <p
+        className="flex items-center justify-center"
+        style={{ ...box(0.76, 6.77, 5.17, 0.73), background: "var(--blue)", color: "#fff", fontSize: "clamp(5px, 0.75vw, 10.5px)" }}
+      >
+        www.silagroup.co.in
+      </p>
+      <PageSquare n={page} />
+    </div>
+  );
+}
+
+/** Turns "2026-08" into "August 2026", as the deck does. */
+function prettyMonth(value: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(value.trim());
+  if (!m) return value;
+  const names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const name = names[parseInt(m[2], 10) - 1];
+  return name ? `${name} ${m[1]}` : value;
+}
+
+function GlanceSlide({ summary, page }: { summary: CuratedDeck["summary"]; page: number }) {
+  return (
+    <Chrome title="This Month at a Glance" page={page}>
       <p
         style={{
           fontFamily: "var(--serif)",
@@ -164,12 +256,12 @@ function slideTitle(s: OutlineSlide): string {
 }
 
 /** Mirrors the contents slide in generate-deck.ts: one column, two past eight. */
-function ContentsSlide({ labels, reportMonth }: { labels: string[]; reportMonth: string }) {
+function ContentsSlide({ labels, reportMonth, page }: { labels: string[]; reportMonth: string; page: number }) {
   const cols = labels.length > 8 ? 2 : 1;
   const perCol = Math.ceil(labels.length / cols);
   const columns = Array.from({ length: cols }, (_, c) => labels.slice(c * perCol, (c + 1) * perCol));
   return (
-    <Chrome title={`Contents — ${reportMonth}`}>
+    <Chrome title={`Contents — ${prettyMonth(reportMonth)}`} page={page}>
       <div className="flex gap-[5%]">
         {columns.map((col, c) => (
           <ul key={c} className="flex-1 space-y-[3%]">
@@ -186,36 +278,9 @@ function ContentsSlide({ labels, reportMonth }: { labels: string[]; reportMonth:
   );
 }
 
-/** Mirrors the closing slide: photograph (shown here as a panel), orange band, blue footer. */
-function ClosingSlide() {
+function SectionSlide({ page, pageNumber }: { page: { label: string; rows: Row[] }; pageNumber: number }) {
   return (
-    <div className="absolute inset-0 flex flex-col">
-      <div style={{ height: "8.6%", background: "var(--blue)" }} />
-      <div className="relative min-h-0 flex-1">
-        <div className="absolute inset-y-0 left-[6%] right-[6%]" style={{ background: "#9a9a9a" }}>
-          <p className="p-[2%] text-[11px]" style={{ color: "#eee" }}>
-            The cover photograph, in black and white
-          </p>
-        </div>
-        <div
-          className="absolute left-0 flex items-center"
-          style={{ top: "38%", width: "55%", height: "26%", background: "var(--sun)", paddingLeft: "6%" }}
-        >
-          <p style={{ fontFamily: "var(--serif)", fontSize: "clamp(12px, 2.8vw, 30px)", letterSpacing: "0.12em" }}>
-            THANK YOU
-          </p>
-        </div>
-      </div>
-      <div className="flex items-center" style={{ height: "12%", width: "46%", background: "var(--blue)", paddingLeft: "6%" }}>
-        <p style={{ color: "#fff", fontSize: "clamp(7px, 1vw, 11px)" }}>www.silagroup.co.in</p>
-      </div>
-    </div>
-  );
-}
-
-function SectionSlide({ page }: { page: { label: string; rows: Row[] } }) {
-  return (
-    <Chrome title={page.label}>
+    <Chrome title={page.label} page={pageNumber}>
       <div className="flex h-full flex-col gap-[2.5%]">
         {page.rows.map((row, n) =>
           row.kind === "full" ? (
