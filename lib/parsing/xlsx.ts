@@ -66,6 +66,13 @@ export function readWorkbookRows(buffer: Buffer): Record<string, unknown[][]> {
         cell.v = text;
         cell.w = text;
       }
+      // Once decoded here, a cell's date format has done its job and goes.
+      // SheetJS 0.20's sheet_to_json turns any number carrying a date format
+      // into a Date in the server's local time - 1 Apr 2025 came out as
+      // "2025-03-31T18:30:00.000Z" on an IST machine - and returned the text
+      // cells written above as null. A date left numeric here (a zero from an
+      // empty formula) must stay the number isRealRow filters on.
+      if (typeof cell.z === "string" && XLSX.SSF.is_date(cell.z)) delete cell.z;
     }
     sheets[sheetName] = XLSX.utils.sheet_to_json(ws, { header: 1 }) as unknown[][];
   }
@@ -79,12 +86,49 @@ function isRealRow(row: unknown[]): boolean {
   return true;
 }
 
+/** Rows of one sheet shown to the model before the rest are left out. A real
+ *  submission's master workbooks reach 2.1M characters in full against 380k
+ *  at this limit, so the limit stays and a cut sheet says so. */
+export const SHEET_ROW_LIMIT = 25;
+
+/** The line that ends a sheet the model is not shown in full. The prompt
+ *  refers to it by this wording. */
+export const CUT_SHORT = "... further rows not shown - this sheet is cut short here";
+
+/**
+ * A sheet as the model reads it: a heading, then its rows as JSON.
+ *
+ * It carries no row count. The count used to be printed as "(N real data
+ * rows)", but N included the header, title and TOTAL rows, so a 40-task sheet
+ * was announced as 42. Once a sheet was cut short, that wrong figure was the
+ * only total the model could see, and the grounding check accepted it because
+ * it was written in the source. A count that cannot be stated correctly is not
+ * stated.
+ */
+export function sheetText(heading: string, rows: unknown[][], indent = ""): string {
+  const lines = [heading];
+  for (const r of rows.slice(0, SHEET_ROW_LIMIT)) lines.push(indent + JSON.stringify(r));
+  if (rows.length > SHEET_ROW_LIMIT) lines.push(indent + CUT_SHORT);
+  return lines.join("\n");
+}
+
+/** Every non-empty sheet of a workbook, as the model reads it. */
+export function workbookText(sheets: Record<string, unknown[][]>): string {
+  return Object.entries(sheets)
+    .filter(([, rows]) => rows.length > 0)
+    .map(([name, rows]) => sheetText(`--- Sheet: ${name} ---`, rows))
+    .join("\n\n");
+}
+
 export function extractXlsx(buffer: Buffer): { sheets: Record<string, unknown[][]>; summary: string } {
   const sheets: Record<string, unknown[][]> = {};
   for (const [sheetName, raw] of Object.entries(readWorkbookRows(buffer))) {
     sheets[sheetName] = raw.filter(isRealRow);
   }
 
+  // `summary` is what app/api/parse-submission returns to n8n, so its wording
+  // is left exactly as that workflow has always received it. This app's own
+  // prompts use workbookText.
   const summary = Object.entries(sheets)
     .filter(([, rows]) => rows.length > 0)
     .map(([sheetName, rows]) => {

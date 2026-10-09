@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
 import { extractPptx } from "./parsing/pptx";
-import { extractXlsx } from "./parsing/xlsx";
+import { extractXlsx, sheetText, workbookText } from "./parsing/xlsx";
 import { extractImages, imageManifest, type ExtractedImage } from "./parsing/images";
-
-/** Rows of an embedded sheet shown to the model before the rest are summarised as a count. */
-const EMBEDDED_SHEET_ROW_LIMIT = 25;
 
 function sheetFingerprint(sheets: Record<string, unknown[][]>): string {
   // Dedup exists because one MMR had several embedded copies of a single
@@ -45,31 +42,41 @@ export async function extractAllFiles(files: { buffer: Buffer; name: string }[])
         allImages.push({ ...img, id: `img${++imageIdOffset}` });
       }
 
+      // Copies of one workbook are emitted once, named by every chart and
+      // slide that uses them: five charts in one real MMR were backed by the
+      // same master workbook, and labelling it with whichever copy came first
+      // tied it to one chart and hid that the other four drew on it too.
+      const groups = new Map<string, typeof embeddedWorkbooks>();
       for (const wb of embeddedWorkbooks) {
         const fp = sheetFingerprint(wb.sheets);
-        if (seenFingerprints.has(fp)) continue;
+        if (seenFingerprints.has(fp)) continue; // already emitted from an earlier file
+        groups.set(fp, [...(groups.get(fp) ?? []), wb]);
+      }
+      for (const [fp, copies] of groups) {
         seenFingerprints.add(fp);
-        // Each sheet carries its real row count and says when it was cut, as
-        // standalone workbooks already do; otherwise the model cannot tell a
-        // truncated list from a complete one and may count or sum a part of it.
-        const sheetText = Object.entries(wb.sheets)
+        // A sheet the model is not shown in full says so, so that it never
+        // counts or totals part of a list as if it were the whole.
+        const sheetsText = Object.entries(copies[0].sheets)
           .filter(([, rows]) => rows.length > 0)
-          .map(([name, rows]) => {
-            const lines = [`  sheet "${name}" (${rows.length} real data rows):`];
-            for (const r of rows.slice(0, EMBEDDED_SHEET_ROW_LIMIT)) lines.push("    " + JSON.stringify(r));
-            if (rows.length > EMBEDDED_SHEET_ROW_LIMIT) {
-              lines.push(`    ... ${rows.length - EMBEDDED_SHEET_ROW_LIMIT} more rows not shown`);
-            }
-            return lines.join("\n");
-          })
+          .map(([name, rows]) => sheetText(`  sheet "${name}":`, rows, "    "))
           .join("\n");
-        if (sheetText) {
-          textParts.push(`=== Embedded workbook in ${file.name} (${wb.fileName}) ===\n${sheetText}`);
-        }
+        if (!sheetsText) continue;
+        const uses = [
+          ...new Set(
+            copies
+              .filter((c) => c.slideNumber !== undefined)
+              .sort((a, b) => a.slideNumber! - b.slideNumber!)
+              .map((c) => (c.chartTitle ? `chart "${c.chartTitle}" on slide ${c.slideNumber}` : `slide ${c.slideNumber}`))
+          ),
+        ];
+        textParts.push(
+          `=== Embedded workbook in ${file.name} (${copies[0].fileName})` +
+            `${uses.length > 0 ? ` - used by ${uses.join("; ")}` : ""} ===\n${sheetsText}`
+        );
       }
     } else if (lower.endsWith(".xlsx")) {
-      const { summary } = extractXlsx(file.buffer);
-      textParts.push(`=== Source file: ${file.name} ===\n${summary}`);
+      const { sheets } = extractXlsx(file.buffer);
+      textParts.push(`=== Source file: ${file.name} ===\n${workbookText(sheets)}`);
     }
   }
 
