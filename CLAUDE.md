@@ -52,7 +52,10 @@ generated six times and produced six different colour assignments, some with
 touching slices the same colour. So `chartPalette(n)` returns exactly one
 colour per point, and a single-series bar chart is passed exactly one colour
 (more than one and every bar is coloured separately, as if the months were
-different categories). Verified by rendering.
+different categories). Verified by rendering. Distinct hex codes are not
+enough: the twelve colours are chosen so every pair is at least 10 apart in
+CIEDE2000, because tints of two hues alone gave a 10-slice pie two oranges a
+reader could not tell apart.
 
 **`dataLabelPosition: "outEnd"` works on a pie, not on a doughnut.** On a
 doughnut it is ignored and labels are forced inside the ring, where no single
@@ -71,9 +74,31 @@ widest cell wraps to, not as a flat per-row figure.
 
 **A line chart needs its axis bounds set explicitly.** Left automatic the
 value axis started at zero: consumption moving 27,240 to 28,920 rendered as a
-dead flat rule. `niceAxisBounds()` pads the real range and rounds outwards.
+dead flat rule. `niceAxis()` in `lib/chart-style.ts` pads the real range and rounds outwards.
 A truncated axis is honest on a line, which encodes by position — but not on
-a bar, which encodes by length and therefore keeps `valAxisMinVal: 0`.
+a bar, which encodes by length and therefore keeps `valAxisMinVal: 0`. Axis
+labels take their decimal places from the step (`axisDecimals`), never from
+the data: gridlines 0.0005 apart labelled to three places read 0.995, 0.995,
+0.996 — duplicate ticks and a top label nobody submitted.
+
+**Slide XML text must be parsed as text.** fast-xml-parser's defaults turn a
+run that is only a number into a number and trim a run that is only a space.
+The text collector keeps strings, so every numeric cell in a slide table — a
+Sr. No. column, a reading, a headcount — reached the model empty. `pptx.ts`
+sets `parseTagValue: false, trimValues: false`; keep it.
+
+**SheetJS comes from its CDN, not npm.** The npm `xlsx` package stopped at
+0.18.5, which has open advisories (prototype pollution, ReDoS — we parse
+uploaded files) and decodes ISO date cells in the server's local timezone, so
+1 Apr 2025 became March on an IST machine. `package.json` points at the
+0.20.3 tarball on cdn.sheetjs.com.
+
+**An extractor annotation must never state a figure it cannot state
+correctly.** Sheets used to be headed "(N real data rows)", with N counting
+the header, title and TOTAL rows; once a sheet was cut short that wrong count
+was the only total the model saw, and grounding accepted it because it was
+in the source. Sheets now carry no count, a cut one ends with `CUT_SHORT`,
+and grounding strips the extractor's own slide numbers and file names.
 
 **Escape apostrophes before interpolating into SQL.** n8n workflows build
 SQL by string interpolation, and an apostrophe in an email body has already

@@ -35,38 +35,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     // (not file_name), and source_id is NOT NULL and UNIQUE with no
     // default, so it has to be supplied.
     //
-    // Any earlier row for this site and month stops being the latest before
-    // the new one claims it. Committing twice is reachable: if the mmr_status
-    // write below fails, this route returns 500 without burning the token, so
-    // the submitter can press Confirm again — and that used to leave two
-    // registry rows for one month both flagged is_latest, with nothing to say
-    // which one anything downstream should read. The table carries `version`
-    // and `is_latest`, so superseding rather than replacing is what it is
-    // shaped for; a retry costs one redundant row, never an ambiguous one.
+    // Committing twice is reachable: if the mmr_status write below fails,
+    // this route returns 500 without burning the token, so the submitter can
+    // press Confirm again. The table carries `is_latest`, so a new deck
+    // supersedes the old one rather than replacing it, and exactly one final
+    // deck per site and month should be the latest.
     //
-    // Deliberately a plain update rather than an upsert keyed on source_id:
-    // that would be tidier, but it needs a UNIQUE constraint on source_id
-    // that nothing here has verified against the live schema, and a wrong
-    // guess fails the final step of the submission.
-    const { error: supersedeError } = await supabase
+    // The new row is written first and only rows older than it are retired
+    // afterwards. The other order - retire, then insert - left the month
+    // with no latest deck at all whenever the insert failed, and two
+    // concurrent commits each retired nothing of the other's and both stayed
+    // latest. Now a failed insert changes nothing, and of two commits the
+    // newer row - the higher id, which the database assigns at insert -
+    // always retires the older, whichever finishes first. Making it atomic
+    // outright needs a transaction, which the REST client cannot open; the
+    // window left is two inserts whose ids and commits land in opposite
+    // orders within the same instant.
+    const { data: inserted, error: regError } = await supabase
       .from("document_registry")
-      .update({ is_latest: false })
-      .eq("site_id", resolved.siteId)
-      .eq("report_month", resolved.reportMonth)
-      // Final decks only. The registry also holds the source files and
-      // other formats for the month, each with its own is_latest, and those
-      // are not superseded by a new deck.
-      .eq("format_role", "final_deck")
-      .eq("is_latest", true);
-    if (supersedeError) {
-      return NextResponse.json(
-        { error: `Couldn't supersede the previous deck record: ${supersedeError.message}` },
-        { status: 500 }
-      );
-    }
-
-    const { error: regError } = await supabase.from("document_registry").insert(
-      {
+      .insert({
         source_id: crypto.randomUUID(),
         submission_id: submissionId,
         site_id: resolved.siteId,
@@ -78,10 +65,36 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
         ingestion_status: "success",
         is_latest: true,
         storage_path: storageWarning ? null : storagePath,
-      }
-    );
-    if (regError) {
-      return NextResponse.json({ error: `Couldn't register the deck: ${regError.message}` }, { status: 500 });
+      })
+      .select("id")
+      .single();
+    if (regError || !inserted) {
+      return NextResponse.json(
+        { error: `Couldn't register the deck: ${regError?.message ?? "no row returned"}` },
+        { status: 500 }
+      );
+    }
+
+    const { error: supersedeError } = await supabase
+      .from("document_registry")
+      .update({ is_latest: false })
+      .eq("site_id", resolved.siteId)
+      .eq("report_month", resolved.reportMonth)
+      // Final decks only. The registry also holds the source files and
+      // other formats for the month, each with its own is_latest, and those
+      // are not superseded by a new deck.
+      .eq("format_role", "final_deck")
+      .eq("is_latest", true)
+      .lt("id", inserted.id);
+    if (supersedeError) {
+      // The new deck is registered and correct; the older one is still
+      // flagged latest beside it. Reported rather than failed, for the same
+      // reason as the token burn below - the month is filed.
+      console.error("[commit] filed, but the previous deck record could not be superseded", {
+        siteId: resolved.siteId,
+        reportMonth: resolved.reportMonth,
+        error: supersedeError.message,
+      });
     }
 
     // This single write is what makes Agent 0 stop chasing this site -
