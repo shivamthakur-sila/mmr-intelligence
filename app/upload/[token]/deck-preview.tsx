@@ -6,6 +6,7 @@ import {
   CONTENT_W,
   KPI_CARD_MAX_W,
   KPI_ROW_H,
+  KPI_STRIP_H,
   KPI_STACK_CARD_H,
   KPI_STACK_GAP,
   SPLIT_GUTTER,
@@ -284,7 +285,7 @@ function GlanceSlide({ summary, page }: { summary: CuratedDeck["summary"]; page:
   return (
     <Chrome title="This Month at a Glance" page={page} bare>
       <p style={{ ...box(CONTENT_X, 1.95, CONTENT_W, 0.12 + headLines * 0.3), fontFamily: "var(--serif)", color: "var(--blue)", fontSize: pt(17), lineHeight: 1.2 }}>
-        {summary.headline}
+        {indianFigures(summary.headline)}
       </p>
       {kpis.length > 0 && (
         <div style={box(CONTENT_X, 1.95 + 0.22 + headLines * 0.3, CONTENT_W, KPI_ROW_H)}>
@@ -299,7 +300,7 @@ function GlanceSlide({ summary, page }: { summary: CuratedDeck["summary"]; page:
         return (
           <div key={n}>
             <div style={{ ...box(x, py + 0.06, 0.07, Math.min(0.42, rowH - 0.16)), background: "var(--sun)" }} />
-            <p style={{ ...box(x + 0.22, py, colW - 0.22, rowH - 0.08), fontSize: pt(12), color: SLATE, lineHeight: 1.25, overflow: "hidden" }}>{p}</p>
+            <p style={{ ...box(x + 0.22, py, colW - 0.22, rowH - 0.08), fontSize: pt(12), color: SLATE, lineHeight: 1.25, overflow: "hidden" }}>{indianFigures(p)}</p>
           </div>
         );
       })}
@@ -439,7 +440,7 @@ function BlockView({
     const shown = block.items.slice(0, 4);
     const stacked = w < CONTENT_W / 2;
     const cardW = stacked ? w : Math.min(KPI_CARD_MAX_W, (w - 0.22 * (shown.length - 1)) / shown.length);
-    const cardH = stacked ? KPI_STACK_CARD_H : KPI_ROW_H;
+    const cardH = stacked ? KPI_STACK_CARD_H : block.compact ? KPI_STRIP_H : KPI_ROW_H;
     return (
       <div className={stacked ? "flex flex-col" : "flex"} style={{ gap: inch(stacked ? KPI_STACK_GAP : 0.22) }}>
         {shown.map((k, n) => (
@@ -455,7 +456,7 @@ function BlockView({
               paddingLeft: inch(0.17),
             }}
           >
-            <p className="whitespace-nowrap" style={{ fontFamily: "var(--serif)", color: "var(--blue)", fontSize: pt(stacked ? 26 : 30), lineHeight: 1.1 }}>
+            <p className="whitespace-nowrap" style={{ fontFamily: "var(--serif)", color: "var(--blue)", fontSize: pt(block.compact ? 20 : stacked ? 26 : 30), lineHeight: 1.1 }}>
               {indianFigures(k.value)}
             </p>
             <p style={{ fontSize: pt(8.5), color: MUTED, letterSpacing: "0.1em", marginTop: inch(0.06) }}>{k.label.toUpperCase()}</p>
@@ -573,9 +574,14 @@ function BlockView({
   if (block.type === "bullets") {
     return (
       <div style={panel}>
-        <ul style={{ paddingLeft: inch(0.3), fontSize: pt(12), color: SLATE, lineHeight: 1.25, listStyle: "disc" }}>
+        <ul
+          style={{
+            paddingLeft: inch(0.3), fontSize: pt(12), color: SLATE, lineHeight: 1.25, listStyle: "disc",
+            ...(block.columns === 2 ? { columnCount: 2, columnGap: inch(0.3) } : {}),
+          }}
+        >
           {block.items.map((t, n) => (
-            <li key={n} style={{ marginBottom: w < TEXT_PANEL_MAX_W ? pt(4) : 0 }}>{t}</li>
+            <li key={n} style={{ marginBottom: w < TEXT_PANEL_MAX_W || block.columns === 2 ? pt(4) : 0, breakInside: "avoid" }}>{t}</li>
           ))}
         </ul>
       </div>

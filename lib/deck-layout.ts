@@ -55,8 +55,9 @@ export const TEXT_PANEL_PAD = 0.18;
 
 /** Width of the KPI column when KPIs stand beside a table or chart. */
 export const KPI_COL_W = 2.6;
-/** A row of KPI cards across the slide. */
+/** A row of KPI cards across the slide, and the compact strip version. */
 export const KPI_ROW_H = 1.15;
+export const KPI_STRIP_H = 0.78;
 /** One card in a KPI column, and the gap between cards. */
 export const KPI_STACK_CARD_H = 0.98;
 export const KPI_STACK_GAP = 0.14;
@@ -336,11 +337,18 @@ export function kpiStackHeight(count: number): number {
 export function blockHeight(b: Block, width = CONTENT_W): number {
   switch (b.type) {
     case "kpis":
-      return width < CONTENT_W / 2 ? kpiStackHeight(b.items.length) : KPI_ROW_H;
+      return width < CONTENT_W / 2 ? kpiStackHeight(b.items.length) : b.compact ? KPI_STRIP_H : KPI_ROW_H;
     case "table":
       return tableGeometry(b, width).total + footnoteHeight(b.footnote, width);
-    case "narrative":
-    case "bullets": {
+    case "bullets":
+      if (b.columns === 2) {
+        const half = (width - SPLIT_GUTTER) / 2;
+        const cut = Math.ceil(b.items.length / 2);
+        const h = (items: string[]) => items.reduce((sum, item) => sum + bulletHeight(item, half), 0);
+        return Math.max(h(b.items.slice(0, cut)), h(b.items.slice(cut)));
+      }
+    // falls through
+    case "narrative": {
       // Beside photos or a chart, text sits in a padded panel.
       const panel = width < TEXT_PANEL_MAX_W;
       const inner = panel ? width - 2 * TEXT_PANEL_PAD : width;
@@ -402,7 +410,7 @@ export function planRows(blocks: Block[]): Row[] {
 
     if (chartAndTable(a, b)) {
       const table = (a.type === "table" ? a : b) as Table;
-      if (tokensFit(table, SPLIT_W) && blockHeight(table, SPLIT_W) <= CONTENT_H) {
+      if (tokensFit(table, SPLIT_W) && blockHeight(table, SPLIT_W) <= CONTENT_H + FIT_TOLERANCE) {
         rows.push({ kind: "split", left: a.type === "chart" ? a : b!, right: a.type === "chart" ? b! : a, leftW: SPLIT_W });
         i++;
         continue;
@@ -412,7 +420,7 @@ export function planRows(blocks: Block[]): Row[] {
     if (a.type === "kpis" && a.items.length <= 4 && b && (b.type === "table" || b.type === "chart") && !chartAndTable(b, blocks[i + 2])) {
       const rightW = CONTENT_W - KPI_COL_W - SPLIT_GUTTER;
       const fits =
-        b.type === "chart" || (tokensFit(b, rightW) && blockHeight(b, rightW) <= CONTENT_H);
+        b.type === "chart" || (tokensFit(b, rightW) && blockHeight(b, rightW) <= CONTENT_H + FIT_TOLERANCE);
       if (fits && kpiStackHeight(a.items.length) <= CONTENT_H) {
         rows.push({ kind: "split", left: a, right: b, leftW: KPI_COL_W });
         i++;
@@ -706,15 +714,78 @@ function roomyTables(rows: Row[]): Row[] {
   });
 }
 
+/**
+ * KPI cards left alone on a slide because what they summarise does not fit
+ * beneath them read as a broken slide - three times in one real 33-slide deck.
+ * Before the rows are split onto slides, each KPI row that would be stranded
+ * this way is reworked, in order of preference:
+ *   1. beside the chart of a chart-and-table pair, with the table below;
+ *   2. as a low strip;
+ *   3. as a low strip over a table drawn compact;
+ *   4. in a column beside a table drawn compact.
+ * If none fits, the rows are left as they were.
+ */
+function unstrandKpis(rows: Row[]): Row[] {
+  const out = [...rows];
+  const fits = (a: Row, b: Row) => rowMinHeight(a) + BLOCK_SPACING + rowMinHeight(b) <= CONTENT_H + FIT_TOLERANCE;
+  for (let i = 0; i + 1 < out.length; i++) {
+    const k = out[i];
+    const next = out[i + 1];
+    if (k.kind !== "full" || k.block.type !== "kpis" || fits(k, next)) continue;
+    const kpis = k.block;
+
+    if (next.kind === "split" && next.left.type === "chart" && next.right.type === "table" && kpis.items.length <= 4) {
+      const beside: Row = { kind: "split", left: kpis, right: next.left, leftW: KPI_COL_W };
+      const below: Row = { kind: "full", block: next.right };
+      if (rowMinHeight(beside) <= CONTENT_H && rowMinHeight(below) <= CONTENT_H) {
+        out.splice(i, 2, beside, below);
+        continue;
+      }
+    }
+    const strip: Row = { kind: "full", block: { ...kpis, compact: true } };
+    if (fits(strip, next)) {
+      out[i] = strip;
+      continue;
+    }
+    if (next.kind === "full" && next.block.type === "table" && !next.block.dense) {
+      const table = { ...next.block, dense: true };
+      const dense: Row = { kind: "full", block: table };
+      if (fits(strip, dense)) {
+        out.splice(i, 2, strip, dense);
+        continue;
+      }
+      const rightW = CONTENT_W - KPI_COL_W - SPLIT_GUTTER;
+      if (kpis.items.length <= 4 && tokensFit(table, rightW)) {
+        const beside: Row = { kind: "split", left: kpis, right: table, leftW: KPI_COL_W };
+        if (rowMinHeight(beside) <= CONTENT_H + FIT_TOLERANCE) out.splice(i, 2, beside);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * A long list of short points in a single column ran down the left third of
+ * the slide and left the rest white; past seven points of under a line each,
+ * the list flows into two columns.
+ */
+function twoColumnLists(blocks: Block[]): Block[] {
+  return blocks.map((b) => {
+    if (b.type !== "bullets" || b.items.length < 7) return b;
+    const short = b.items.every((t) => t.length <= 110);
+    return short ? { ...b, columns: 2 as const } : b;
+  });
+}
+
 /** Every slide a section becomes, in order. */
 export function sectionSlides<T extends { label: string; blocks: Block[] }>(
   section: T
 ): { label: string; rows: Row[] }[] {
-  const blocks = attachFootnotes(section.blocks).flatMap((b) =>
+  const blocks = twoColumnLists(attachFootnotes(section.blocks)).flatMap((b) =>
     b.type === "table" ? chunkTable(b) : b.type === "bullets" || b.type === "narrative" ? chunkText(b) : [b]
   );
   const out: { label: string; rows: Row[] }[] = [];
-  let remaining = planRows(blocks);
+  let remaining = unstrandKpis(planRows(blocks));
   while (remaining.length > 0) {
     const { take, rest } = splitRows(remaining);
     out.push({

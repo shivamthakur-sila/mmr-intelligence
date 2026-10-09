@@ -154,7 +154,13 @@ spent reviewing it.
 - **Output limits are a real failure mode.** Truncated JSON has broken
   production. Check `stop_reason === 'max_tokens'` and surface it as
   itself, never as a JSON parse error. Current limits: validate 1500,
-  review 8000, curate 20000.
+  review 8000, curate 48000 at effort "medium".
+- **The model's reasoning is most of the wait, and it counts against
+  max_tokens.** On a real five-location submission curation spent 16,187
+  of 20,951 output tokens thinking, took over four minutes and, on another
+  run, ran out of tokens. Effort "medium" brought the three real
+  submissions to 2-4 minutes end to end. Calls are streamed through the SDK
+  (`callClaude`): a silent multi-minute request was reset mid-wait.
 - **Model output is a structural contract.** Curation returns JSON the
   renderer consumes directly. Adding a block type means changing the
   prompt, the TypeScript type, the renderer, and the browser preview

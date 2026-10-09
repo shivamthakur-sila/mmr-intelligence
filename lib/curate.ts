@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { groundDeck, type GroundingIssue } from "./grounding";
 import { CUT_SHORT } from "./parsing/xlsx";
 
@@ -102,7 +103,7 @@ IMPORTANT — what to include: build the deck ONLY from parameters that have gen
 Chart what can be charted. Wherever a section's figures form a series — across months, across locations, across categories, or as parts of one total — give that section a chart block. A section of real series data shown only as a table reads as a data dump rather than a report. Chart only from data you have in full: a sheet ending "${CUT_SHORT}" has been cut short, so never count or total it.
 
 Each section becomes one slide, holding several blocks stacked in order:
-- {"type":"table","headers":[...],"rows":[[...]]} — real headers and rows exactly as in the source. Include every row the source gives for this month - the renderer draws long tables compact and continues them onto further slides, so never cut a table to a selection. Leave out any column that is empty in every row. A table has no "note" field - a caveat is always its own note block.
+- {"type":"table","headers":[...],"rows":[[...]]} — real headers and rows exactly as in the source. Include every row the source gives for this month, up to 30 - the renderer draws long tables compact and continues them onto further slides. Only past 30 rows, show the 30 most relevant and add a note saying the table is a selection. Leave out any column that is empty in every row. A table has no "note" field - a caveat is always its own note block.
 - {"type":"table","headers":[...],"rows":[[...]],"groups":[{"label":"Housekeeping","afterRow":0},{"label":"Technical","afterRow":5}]} — a table with category band rows. Use whenever rows fall into natural groups (service line, location, floor); grouped tables read far better than flat ones.
 - {"type":"narrative","text":"..."} — 1-4 sentences, only what the source states.
 - {"type":"bullets","items":["..."]} — 2-6 short points.
@@ -144,8 +145,18 @@ export type Block =
       footnote?: string;
     }
   | { type: "narrative"; text: string }
-  | { type: "bullets"; items: string[] }
-  | { type: "kpis"; items: { label: string; value: string }[] }
+  | {
+      type: "bullets";
+      items: string[];
+      /** layout: a long list of short points flows into two columns. */
+      columns?: 2;
+    }
+  | {
+      type: "kpis";
+      items: { label: string; value: string }[];
+      /** layout: drawn as a low strip so what it summarises fits beneath it. */
+      compact?: boolean;
+    }
   | {
       type: "chart";
       chartType: "bar" | "line" | "pie";
@@ -181,40 +192,54 @@ export type CuratedDeck = {
   submitterWarnings?: string[];
 };
 
-async function callClaude(step: string, system: string, user: string, maxTokens: number): Promise<string> {
+/**
+ * How hard the model thinks before answering. Its reasoning counts against
+ * max_tokens and is most of the wait: on a real five-location submission
+ * curation spent 16,187 of 20,951 output tokens thinking and ran past four
+ * minutes, against a 300-second limit on the whole build. "medium" keeps
+ * curation inside both.
+ */
+type Effort = "low" | "medium" | "high";
+
+async function callClaude(step: string, system: string, user: string, maxTokens: number, effort?: Effort): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY isn't set in this deployment.");
 
-  // A dropped connection surfaces from fetch as a bare "fetch failed", which
-  // names neither the step nor the cause; both are added here.
-  let res: Response;
+  // Streamed. A large submission's curation runs for minutes, and a request
+  // that sits silent that long was reset mid-wait (ECONNRESET) on a real
+  // 110k-token deck; a stream keeps the connection busy, and the SDK retries
+  // a connection that drops before the answer starts.
+  const client = new Anthropic({ apiKey, maxRetries: 2 });
+  let message: Anthropic.Message;
   try {
-    res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({
+    message = await client.messages
+      .stream({
         model: "claude-sonnet-5",
         max_tokens: maxTokens,
         system,
         messages: [{ role: "user", content: user }],
-      }),
-    });
+        ...(effort ? { output_config: { effort } } : {}),
+      })
+      .finalMessage();
   } catch (e) {
+    if (e instanceof Anthropic.APIError && e.status) {
+      throw new Error(`Claude API call for ${step} failed (${e.status}): ${e.message.slice(0, 300)}`);
+    }
     const cause = (e as { cause?: { message?: string; code?: string } }).cause;
     throw new Error(
-      `The ${step} request to Claude failed before any response arrived: ` +
+      `The ${step} request to Claude failed before a full response arrived: ` +
         `${(e as Error).message}${cause ? ` (${cause.code ?? cause.message})` : ""}`
     );
   }
 
-  if (!res.ok) throw new Error(`Claude API call for ${step} failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
-
-  const data = await res.json();
-  const text = data.content?.find((b: { type: string }) => b.type === "text")?.text ?? "";
-  if (!text) throw new Error(`Claude returned an empty response for ${step}.`);
-  if (data.stop_reason === "max_tokens") {
+  if (message.stop_reason === "max_tokens") {
     throw new Error(`Claude's ${step} response was cut off by the output limit before the JSON finished. Raise max_tokens in lib/curate.ts.`);
   }
+  const text = message.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+  if (!text) throw new Error(`Claude returned an empty response for ${step} (stop reason: ${message.stop_reason}).`);
   return text;
 }
 
@@ -526,7 +551,7 @@ export async function curateDeck(
       ? userAnswers.map((a) => `- ${a.label}: ${a.answer}`).join("\n")
       : "(no gap answers were supplied)";
   const user = `Site: ${siteName}\nReport month: ${reportMonth}\n\n--- AVAILABLE PHOTOGRAPHY ---\n${imageManifest}\n\n--- ANSWERS SUPPLIED FOR GAPS ---\n${answers}\n\n--- EXTRACTED SOURCE CONTENT ---\n${combinedText}`;
-  const deck = sanitiseBlocks(parseJson<CuratedDeck>(await callClaude("curation", curateSystem(items), user, 20000), "curation"));
+  const deck = sanitiseBlocks(parseJson<CuratedDeck>(await callClaude("curation", curateSystem(items), user, 48000, "medium"), "curation"));
 
   // The submitter's typed answers are source material too: a figure they
   // supplied for a gap is theirs, not the model's.

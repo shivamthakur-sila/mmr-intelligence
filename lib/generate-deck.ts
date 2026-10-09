@@ -12,6 +12,7 @@ import {
   FOOTNOTE_SIZE,
   KPI_CARD_MAX_W,
   KPI_ROW_H,
+  KPI_STRIP_H,
   KPI_STACK_CARD_H,
   KPI_STACK_GAP,
   SPLIT_GUTTER,
@@ -277,8 +278,11 @@ function chrome(slide: pptxgen.Slide, title: string, pageNum: number) {
  */
 function renderGlance(slide: pptxgen.Slide, summary: CuratedDeck["summary"]) {
   let y = CONTENT_TOP;
+  // The headline and facts carry the same figures as the tiles above them,
+  // so they are grouped the same way: 31,64,000 L in a tile and 3,164,000 L
+  // in the sentence under it read as two different numbers.
   const headLines = Math.max(1, Math.ceil(summary.headline.length / 105));
-  slide.addText(summary.headline, {
+  slide.addText(indianFigures(summary.headline), {
     x: CONTENT_X, y, w: CONTENT_W, h: 0.12 + headLines * 0.3,
     fontFace: HEAD_FONT, fontSize: 17, color: FM_BLUE, valign: "top", margin: [0, 4, 0, 4],
   });
@@ -303,7 +307,7 @@ function renderGlance(slide: pptxgen.Slide, summary: CuratedDeck["summary"]) {
     const x = CONTENT_X + col * (colW + gutter);
     const py = y + (i % perCol) * rowH;
     slide.addShape("rect", { x, y: py + 0.06, w: 0.07, h: Math.min(0.42, rowH - 0.16), fill: { color: SUNSHINE }, line: { type: "none" } });
-    slide.addText(pt, {
+    slide.addText(indianFigures(pt), {
       x: x + 0.22, y: py, w: colW - 0.22, h: rowH - 0.08,
       fontFace: BODY_FONT, fontSize: 12, color: SLATE, valign: "top", fit: "shrink",
     });
@@ -393,7 +397,8 @@ function renderKpis(
   x: number,
   y: number,
   w: number,
-  stacked: boolean
+  stacked: boolean,
+  compact = false
 ) {
   // Carded like the house decks: a bordered panel with an orange edge and
   // the figure set large. In a row each card is capped in width and the row
@@ -405,7 +410,7 @@ function renderKpis(
     slide.addShape("rect", { x: kx, y: ky, w: 0.07, h: kh, fill: { color: SUNSHINE }, line: { type: "none" } });
     slide.addText(indianFigures(kpi.value), {
       x: kx + 0.24, y: ky + 0.1, w: kw - 0.36, h: kh * 0.55,
-      fontFace: HEAD_FONT, fontSize: stacked ? 26 : 30, color: FM_BLUE, valign: "middle", fit: "shrink",
+      fontFace: HEAD_FONT, fontSize: compact ? 20 : stacked ? 26 : 30, color: FM_BLUE, valign: "middle", fit: "shrink",
     });
     slide.addText(kpi.label.toUpperCase(), {
       x: kx + 0.26, y: ky + kh * 0.62, w: kw - 0.38, h: kh * 0.3,
@@ -418,7 +423,7 @@ function renderKpis(
   }
   const gap = 0.22;
   const cw = Math.min(KPI_CARD_MAX_W, (w - gap * (shown.length - 1)) / shown.length);
-  shown.forEach((kpi, i) => card(x + i * (cw + gap), y, cw, KPI_ROW_H, kpi));
+  shown.forEach((kpi, i) => card(x + i * (cw + gap), y, cw, compact ? KPI_STRIP_H : KPI_ROW_H, kpi));
 }
 
 /**
@@ -826,7 +831,7 @@ async function renderBlock(
 ) {
   switch (block.type) {
     case "kpis":
-      renderKpis(slide, block.items, x, y, w, w < CONTENT_W / 2);
+      renderKpis(slide, block.items, x, y, w, w < CONTENT_W / 2, block.compact);
       break;
     case "chart":
       renderChart(slide, block, y, h, x, w, compact);
@@ -857,13 +862,22 @@ async function renderBlock(
           fontFace: BODY_FONT, fontSize: 12.5, color: SLATE, valign: "top", lineSpacingMultiple: 1.1,
         });
       } else {
-        slide.addText(
-          block.items.map((t) => ({
-            text: t,
-            options: { bullet: { characterCode: "2022" }, breakLine: true, paraSpaceAfter: panel ? 4 : 0 },
-          })),
-          { x: tx + 0.1, y: ty, w: tw - 0.1, h: th, fontFace: BODY_FONT, fontSize: 12, color: SLATE, valign: "top", lineSpacingMultiple: 1.1 }
-        );
+        // A long list of short points runs in two columns.
+        const columns = block.columns === 2 ? 2 : 1;
+        const colW = (tw - SPLIT_GUTTER * (columns - 1)) / columns;
+        const cut = Math.ceil(block.items.length / columns);
+        for (let c = 0; c < columns; c++) {
+          slide.addText(
+            block.items.slice(c * cut, (c + 1) * cut).map((t) => ({
+              text: t,
+              options: { bullet: { characterCode: "2022" }, breakLine: true, paraSpaceAfter: panel || columns > 1 ? 4 : 0 },
+            })),
+            {
+              x: tx + 0.1 + c * (colW + SPLIT_GUTTER), y: ty, w: colW - 0.1, h: th,
+              fontFace: BODY_FONT, fontSize: 12, color: SLATE, valign: "top", lineSpacingMultiple: 1.1,
+            }
+          );
+        }
       }
       break;
     }
