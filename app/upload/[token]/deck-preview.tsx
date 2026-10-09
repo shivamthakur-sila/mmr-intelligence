@@ -16,6 +16,7 @@ import {
   splitRightW,
   tableGeometry,
   tableType,
+  type ContentsChapter,
   type OutlineSlide,
   type PhotoGeometry,
   type Row,
@@ -75,7 +76,8 @@ export default function DeckPreview({
       >
         {current.kind === "cover" && <CoverSlide siteName={siteName} reportMonth={reportMonth} photo={coverImage} />}
         {current.kind === "glance" && <GlanceSlide summary={deck.summary} page={i + 1} />}
-        {current.kind === "contents" && <ContentsSlide labels={current.labels} reportMonth={reportMonth} page={i + 1} />}
+        {current.kind === "contents" && <ContentsSlide chapters={current.chapters} reportMonth={reportMonth} page={i + 1} />}
+        {current.kind === "divider" && <DividerSlide number={current.number} chapter={current.chapter} page={i + 1} photo={coverImage} />}
         {current.kind === "section" && <SectionSlide page={current} pageNumber={i + 1} photos={photos} />}
         {current.kind === "closing" && <ClosingSlide page={i + 1} photo={coverImage} />}
       </div>
@@ -142,7 +144,7 @@ function PageSquare({ n }: { n: number }) {
   return (
     <div
       className="flex items-center justify-center font-semibold"
-      style={{ ...box(12.586, 6.753, 0.747, 0.747), background: "var(--sun)", color: CHARCOAL, fontSize: "clamp(6px, 0.9vw, 11px)" }}
+      style={{ ...box(12.586, 6.753, 0.747, 0.747), background: "var(--sun)", color: CHARCOAL, fontSize: `${(12 * 7.5) / 72}cqw` }}
     >
       {String(n).padStart(2, "0")}
     </div>
@@ -265,28 +267,40 @@ function prettyMonth(value: string): string {
   return name ? `${name} ${m[1]}` : value;
 }
 
+/** Mirrors renderGlance in generate-deck.ts: headline, figure tiles, facts in two columns. */
 function GlanceSlide({ summary, page }: { summary: CuratedDeck["summary"]; page: number }) {
+  const headLines = Math.max(1, Math.ceil(summary.headline.length / 105));
+  const kpis = summary.kpis ?? [];
+  const points = summary.points.slice(0, 6);
+  const cols = points.length >= 3 ? 2 : 1;
+  const perCol = Math.ceil(points.length / cols);
+  let y = 1.95 + 0.22 + headLines * 0.3 + (kpis.length > 0 ? KPI_ROW_H + 0.3 : 0);
+  const ruleY = y;
+  y += 0.22;
+  const rowH = Math.min(0.85, (6.7 - y) / Math.max(1, perCol));
+  const colW = (CONTENT_W - 0.5 * (cols - 1)) / cols;
   return (
-    <Chrome title="This Month at a Glance" page={page}>
-      <p
-        style={{
-          fontFamily: "var(--serif)",
-          color: "var(--blue)",
-          fontSize: "clamp(9px, 1.5vw, 15px)",
-          lineHeight: 1.5,
-        }}
-      >
+    <Chrome title="This Month at a Glance" page={page} bare>
+      <p style={{ ...box(CONTENT_X, 1.95, CONTENT_W, 0.12 + headLines * 0.3), fontFamily: "var(--serif)", color: "var(--blue)", fontSize: pt(17), lineHeight: 1.2 }}>
         {summary.headline}
       </p>
-      <div className="mt-[3%]" style={{ borderTop: "1px solid var(--hairline)" }} />
-      <ul className="mt-[3%] space-y-[2.2%]">
-        {summary.points.slice(0, 5).map((p, n) => (
-          <li key={n} className="flex gap-[2%]">
-            <span style={{ width: 3, background: "var(--sun)", flexShrink: 0 }} />
-            <span style={{ fontSize: "clamp(7.5px, 1.15vw, 12px)", lineHeight: 1.45 }}>{p}</span>
-          </li>
-        ))}
-      </ul>
+      {kpis.length > 0 && (
+        <div style={box(CONTENT_X, 1.95 + 0.22 + headLines * 0.3, CONTENT_W, KPI_ROW_H)}>
+          <BlockView block={{ type: "kpis", items: kpis }} w={CONTENT_W} photos={{}} />
+        </div>
+      )}
+      <div style={{ ...box(CONTENT_X, ruleY, CONTENT_W, 0.015), background: "var(--hairline)" }} />
+      {points.map((p, n) => {
+        const col = Math.floor(n / perCol);
+        const x = CONTENT_X + col * (colW + 0.5);
+        const py = y + (n % perCol) * rowH;
+        return (
+          <div key={n}>
+            <div style={{ ...box(x, py + 0.06, 0.07, Math.min(0.42, rowH - 0.16)), background: "var(--sun)" }} />
+            <p style={{ ...box(x + 0.22, py, colW - 0.22, rowH - 0.08), fontSize: pt(12), color: SLATE, lineHeight: 1.25, overflow: "hidden" }}>{p}</p>
+          </div>
+        );
+      })}
     </Chrome>
   );
 }
@@ -296,31 +310,68 @@ function slideTitle(s: OutlineSlide): string {
     case "cover": return "Cover";
     case "glance": return "At a glance";
     case "contents": return "Contents";
+    case "divider": return `${String(s.number).padStart(2, "0")} ${s.chapter}`;
     case "closing": return "Thank you";
     case "section": return s.label;
   }
 }
 
-/** Mirrors the contents slide in generate-deck.ts: one column, two past eight. */
-function ContentsSlide({ labels, reportMonth, page }: { labels: string[]; reportMonth: string; page: number }) {
-  const cols = labels.length > 8 ? 2 : 1;
-  const perCol = Math.ceil(labels.length / cols);
-  const columns = Array.from({ length: cols }, (_, c) => labels.slice(c * perCol, (c + 1) * perCol));
+/** Mirrors renderContents: numbered chapters, their sections, the page each starts on. */
+function ContentsSlide({ chapters, reportMonth, page }: { chapters: ContentsChapter[]; reportMonth: string; page: number }) {
+  const cols = chapters.length > 5 ? 2 : 1;
+  const colW = (CONTENT_W - 0.6 * (cols - 1)) / cols;
+  const perCol = Math.ceil(chapters.length / cols);
+  const rowH = Math.min(0.95, 4.75 / Math.max(1, perCol));
+  const sq = Math.min(0.5, rowH - 0.25);
   return (
-    <Chrome title={`Contents — ${prettyMonth(reportMonth)}`} page={page}>
-      <div className="flex gap-[5%]">
-        {columns.map((col, c) => (
-          <ul key={c} className="flex-1 space-y-[3%]">
-            {col.map((label, n) => (
-              <li key={n} className="flex items-center gap-[4%]" style={{ fontSize: "clamp(6.5px, 1.05vw, 12px)" }}>
-                <span style={{ width: 4, height: "1.1em", background: "var(--sun)", flexShrink: 0 }} />
-                {label}
-              </li>
-            ))}
-          </ul>
-        ))}
-      </div>
+    <Chrome title={`Contents — ${prettyMonth(reportMonth)}`} page={page} bare>
+      {chapters.map((ch, i) => {
+        const x = CONTENT_X + Math.floor(i / perCol) * (colW + 0.6);
+        const y = 1.95 + (i % perCol) * rowH;
+        return (
+          <div key={i}>
+            <div
+              className="flex items-center justify-center"
+              style={{ ...box(x, y + 0.05, sq, sq), background: "var(--sun)", fontFamily: "var(--serif)", color: CHARCOAL, fontSize: pt(14) }}
+            >
+              {String(ch.number).padStart(2, "0")}
+            </div>
+            <p className="flex items-center whitespace-nowrap" style={{ ...box(x + sq + 0.2, y, colW - sq - 1.0, 0.36), fontFamily: "var(--serif)", color: CHARCOAL, fontSize: pt(15) }}>
+              {ch.name}
+            </p>
+            <p style={{ ...box(x + sq + 0.2, y + 0.36, colW - sq - 1.0, rowH - 0.5), color: MUTED, fontSize: pt(10), overflow: "hidden" }}>
+              {ch.sections.join("  ·  ")}
+            </p>
+            <p className="flex items-center justify-end" style={{ ...box(x + colW - 0.7, y, 0.7, 0.36), fontFamily: "var(--serif)", color: "var(--blue)", fontSize: pt(14) }}>
+              {String(ch.page).padStart(2, "0")}
+            </p>
+            <div style={{ ...box(x, y + rowH - 0.1, colW, 0.01), background: "var(--hairline)" }} />
+          </div>
+        );
+      })}
     </Chrome>
+  );
+}
+
+/** Mirrors renderDivider: the deck's photo, an orange block with the chapter, a navy strip. */
+function DividerSlide({ number, chapter, page, photo }: { number: number; chapter: string; page: number; photo: string | null }) {
+  return (
+    <div className="absolute inset-0">
+      <Band />
+      <PanelPhoto photo={photo} />
+      {photo && <LogoPlate x={10.4} y={0.75} w={2.3} h={1.15} />}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/sila-fm-logo-color.png" alt="SILA" style={{ ...box(10.55, 0.9, 2.0, 0.85), objectFit: "contain" }} />
+      <div style={{ ...box(0, 4.64, 9.28, 2.13), background: "var(--sun)" }} />
+      <div style={{ ...box(0, 6.77, 9.29, 0.73), background: "var(--blue)" }} />
+      <p className="flex items-center" style={{ ...box(0.76, 4.78, 2, 0.45), fontFamily: "var(--serif)", color: CHARCOAL, fontSize: pt(18), letterSpacing: "0.15em" }}>
+        {String(number).padStart(2, "0")}
+      </p>
+      <p className="flex items-center" style={{ ...box(0.76, 5.2, 8.2, 1.4), fontFamily: "var(--serif)", color: CHARCOAL, fontSize: pt(36), letterSpacing: "0.12em", lineHeight: 1.1 }}>
+        {chapter.toUpperCase()}
+      </p>
+      <PageSquare n={page} />
+    </div>
   );
 }
 

@@ -1,4 +1,5 @@
 import type { Block } from "./curate";
+import { chapterOf, inChapterOrder, wantsDividers } from "./chapters";
 
 /**
  * How much room each block needs, how blocks pair up across a slide, where a
@@ -689,28 +690,57 @@ export function sectionSlides<T extends { label: string; blocks: Block[] }>(
 // The deck as a whole
 // ---------------------------------------------------------------------------
 
+export type ContentsChapter = { number: number; name: string; sections: string[]; page: number };
+
 export type OutlineSlide =
   | { kind: "cover" }
   | { kind: "glance" }
-  | { kind: "contents"; labels: string[] }
+  | { kind: "contents"; chapters: ContentsChapter[] }
+  | { kind: "divider"; number: number; chapter: string }
   | { kind: "section"; label: string; rows: Row[] }
   | { kind: "closing" };
 
 /**
- * Every slide the deck contains, in order.
+ * Every slide the deck contains, in order: cover, glance, contents, then each
+ * chapter - a numbered divider when the deck has enough chapters to need
+ * them - with its sections, and the closing slide.
  *
- * The preview draws from this and the generate route counts it. When the
- * contents and closing slides were added to the renderer, the preview and the
- * reported slide count both went on describing the old deck - the submitter
- * approved a deck two slides shorter than the one filed. Keep this in step
- * with generateDeck.
+ * The renderer builds from this, the preview draws from it and the generate
+ * route counts it, so the deck the submitter approves is the deck filed.
+ * When only the renderer knew about the contents and closing slides, the
+ * preview and the reported slide count described a deck two slides shorter.
+ * The contents page's numbers come from here too, so each matches the page
+ * its chapter actually starts on.
  */
-export function deckOutline<T extends { label: string; blocks: Block[] }>(sections: T[]): OutlineSlide[] {
+export function deckOutline<T extends { key: string; label: string; blocks: Block[] }>(sections: T[]): OutlineSlide[] {
+  const ordered = inChapterOrder(sections);
+  const chapters: { name: string; sections: T[] }[] = [];
+  for (const s of ordered) {
+    const name = chapterOf(s).name;
+    const last = chapters[chapters.length - 1];
+    if (last && last.name === name) last.sections.push(s);
+    else chapters.push({ name, sections: [s] });
+  }
+  const pages = chapters.map((ch) => ch.sections.flatMap((s) => sectionSlides(s)));
+  const dividers = wantsDividers(chapters.length, pages.reduce((n, p) => n + p.length, 0));
+
+  const body: OutlineSlide[] = [];
+  const starts: number[] = [];
+  // Pages are counted from the cover: cover 1, glance 2, contents 3.
+  chapters.forEach((ch, i) => {
+    starts.push(4 + body.length);
+    if (dividers) body.push({ kind: "divider", number: i + 1, chapter: ch.name });
+    for (const page of pages[i]) body.push({ kind: "section", ...page });
+  });
+
   return [
     { kind: "cover" },
     { kind: "glance" },
-    { kind: "contents", labels: sections.map((s) => s.label) },
-    ...sections.flatMap((s) => sectionSlides(s).map((page) => ({ kind: "section" as const, ...page }))),
+    {
+      kind: "contents",
+      chapters: chapters.map((ch, i) => ({ number: i + 1, name: ch.name, sections: ch.sections.map((s) => s.label), page: starts[i] })),
+    },
+    ...body,
     { kind: "closing" },
   ];
 }

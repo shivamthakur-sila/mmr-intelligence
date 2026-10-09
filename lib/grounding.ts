@@ -334,11 +334,18 @@ export function groundDeck(
     issues.push({ section: "summary", where: "headline", value: headline, action: "dropped" });
     headline = points.shift() ?? "";
   }
+  // The glance tiles are meant to be copied from the sections; checked like
+  // any KPI, value and label both.
+  const kpis = (deck.summary.kpis ?? []).filter((k) => {
+    if (summaryOk(k.value) && summaryOk(k.label)) return true;
+    issues.push({ section: "summary", where: `kpi "${k.label}"`, value: k.value, action: "dropped" });
+    return false;
+  });
 
   return {
     deck: {
       ...deck,
-      summary: { headline, points },
+      summary: { headline, points, ...(kpis.length > 0 ? { kpis } : {}) },
       sections: sections.filter((s) => s.blocks.length > 0),
     },
     issues,

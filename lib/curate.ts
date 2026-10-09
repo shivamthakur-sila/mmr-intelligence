@@ -120,10 +120,10 @@ Notes, the headline and summary points are read by the client. Anything about th
 
 Also nominate a cover photograph as "coverImageId", choosing from the manifest the image that best represents the property as a whole - a building exterior, entrance, or lobby. Prefer a photo from a slide about the site itself over one from a maintenance or activity section; a photo of equipment or a work-in-progress makes a poor cover. Omit the field if nothing suitable exists.
 
-Also write an opening "at a glance" summary: one headline sentence and 3-5 of the month's most significant, specific facts with real figures.
+Also write an opening "at a glance" summary: one headline sentence; 3-5 of the month's most significant, specific facts with real figures, each under 120 characters; and "kpis", 3-4 headline figures for tiles at the top of that slide, each {"label","value"} copied exactly from a KPI or a table cell in one of your sections - never computed for the summary.
 
 Respond with ONLY valid JSON, no fences:
-{"summary":{"headline":"...","points":["..."]},"submitterWarnings":["..."],"coverImageId":"img3","sections":[{"key":"ppm","label":"PPM & Maintenance Schedule","blocks":[{"type":"kpis","items":[{"label":"Completed","value":"16 of 16"}]},{"type":"table","headers":["Location","Equipment"],"rows":[["10th Floor","LTG panel"]]}]}]}
+{"summary":{"headline":"...","points":["..."],"kpis":[{"label":"Complaints closed","value":"269 of 269"}]},"submitterWarnings":["..."],"coverImageId":"img3","sections":[{"key":"ppm","label":"PPM & Maintenance Schedule","blocks":[{"type":"kpis","items":[{"label":"Completed","value":"16 of 16"}]},{"type":"table","headers":["Location","Equipment"],"rows":[["10th Floor","LTG panel"]]}]}]}
 Every section you include must have at least one block.`;
 }
 
@@ -166,7 +166,12 @@ export type Block =
 
 export type CuratedSection = { key: string; label: string; blocks: Block[] };
 export type CuratedDeck = {
-  summary: { headline: string; points: string[] };
+  summary: {
+    headline: string;
+    points: string[];
+    /** Headline figures for the glance slide's tiles, each copied from a section. */
+    kpis?: { label: string; value: string }[];
+  };
   /** Photo id for the cover panel, chosen from the manifest. */
   coverImageId?: string;
   sections: CuratedSection[];
@@ -292,10 +297,24 @@ export function sanitiseBlocks(deck: CuratedDeck): CuratedDeck {
     return { ...section, blocks: out };
   });
 
+  const summary = deck.summary ?? { headline: "", points: [] };
+  const summaryKpis = (Array.isArray(summary.kpis) ? summary.kpis : [])
+    .filter((k) => k && k.value != null && String(k.value).trim())
+    .map((k) => ({ label: String(k.label ?? ""), value: String(k.value).trim() }))
+    .slice(0, 4);
   const submitterWarnings = (Array.isArray(deck.submitterWarnings) ? deck.submitterWarnings : [])
     .map((w) => String(w ?? "").trim())
     .filter(Boolean);
-  return { ...deck, submitterWarnings, sections: sections.filter((s) => s.blocks.length > 0) };
+  return {
+    ...deck,
+    summary: {
+      headline: String(summary.headline ?? ""),
+      points: (Array.isArray(summary.points) ? summary.points : []).map((p) => String(p ?? "")).filter(Boolean),
+      ...(summaryKpis.length > 0 ? { kpis: summaryKpis } : {}),
+    },
+    submitterWarnings,
+    sections: sections.filter((s) => s.blocks.length > 0),
+  };
 }
 
 /**

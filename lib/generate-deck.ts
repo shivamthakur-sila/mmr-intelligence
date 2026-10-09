@@ -6,6 +6,7 @@ import path from "path";
 import type { CuratedDeck, Block } from "./curate";
 import { axisDecimals, chartPalette, decimalsNeeded, indianFigures, niceAxis, numberFormatCode } from "./chart-style";
 import {
+  CONTENT_BOTTOM,
   CONTENT_TOP,
   CONTENT_W,
   FOOTNOTE_SIZE,
@@ -21,7 +22,7 @@ import {
   identifierColumns,
   numericColumns,
   placeRows,
-  sectionSlides,
+  deckOutline,
   splitRightW,
   tableGeometry,
   tableType,
@@ -265,13 +266,121 @@ function chrome(slide: pptxgen.Slide, title: string, pageNum: number) {
   pageSquare(slide, pageNum);
 }
 
-/** One line of the contents list: orange tick bar, then the section name. */
-function slide_contentsRow(slide: pptxgen.Slide, label: string, x: number, y: number, w: number) {
-  slide.addShape("rect", { x, y: y + 0.08, w: 0.1, h: 0.22, fill: { color: SUNSHINE }, line: { type: "none" } });
-  slide.addText(label, {
-    x: x + 0.3, y, w: w - 0.3, h: 0.38,
-    fontFace: BODY_FONT, fontSize: 13, color: SLATE, valign: "middle",
+/**
+ * The glance slide: the headline, the month's headline figures as tiles, then
+ * the key facts in two columns. As a full-width list the figures sat buried
+ * in sentences, and the lower third of the slide was empty.
+ */
+function renderGlance(slide: pptxgen.Slide, summary: CuratedDeck["summary"]) {
+  let y = CONTENT_TOP;
+  const headLines = Math.max(1, Math.ceil(summary.headline.length / 105));
+  slide.addText(summary.headline, {
+    x: CONTENT_X, y, w: CONTENT_W, h: 0.12 + headLines * 0.3,
+    fontFace: HEAD_FONT, fontSize: 17, color: FM_BLUE, valign: "top", margin: [0, 4, 0, 4],
   });
+  y += 0.22 + headLines * 0.3;
+
+  const kpis = summary.kpis ?? [];
+  if (kpis.length > 0) {
+    renderKpis(slide, kpis, CONTENT_X, y, CONTENT_W, false);
+    y += KPI_ROW_H + 0.3;
+  }
+  slide.addShape("rect", { x: CONTENT_X, y, w: CONTENT_W, h: 0.015, fill: { color: HAIRLINE }, line: { type: "none" } });
+  y += 0.22;
+
+  const points = summary.points.slice(0, 6);
+  const cols = points.length >= 3 ? 2 : 1;
+  const gutter = 0.5;
+  const colW = (CONTENT_W - gutter * (cols - 1)) / cols;
+  const perCol = Math.ceil(points.length / cols);
+  const rowH = Math.min(0.85, (CONTENT_BOTTOM - y) / Math.max(1, perCol));
+  points.forEach((pt, i) => {
+    const col = Math.floor(i / perCol);
+    const x = CONTENT_X + col * (colW + gutter);
+    const py = y + (i % perCol) * rowH;
+    slide.addShape("rect", { x, y: py + 0.06, w: 0.07, h: Math.min(0.42, rowH - 0.16), fill: { color: SUNSHINE }, line: { type: "none" } });
+    slide.addText(pt, {
+      x: x + 0.22, y: py, w: colW - 0.22, h: rowH - 0.08,
+      fontFace: BODY_FONT, fontSize: 12, color: SLATE, valign: "top", fit: "shrink",
+    });
+  });
+}
+
+/**
+ * The contents page: numbered chapters, the sections each holds, and the page
+ * each starts on - read off the same outline the deck is built from. A bare
+ * list of section names filled a quarter of the slide and gave a reader no
+ * way to find anything.
+ */
+function renderContents(
+  slide: pptxgen.Slide,
+  chapters: { number: number; name: string; sections: string[]; page: number }[]
+) {
+  const cols = chapters.length > 5 ? 2 : 1;
+  const gutter = 0.6;
+  const colW = (CONTENT_W - gutter * (cols - 1)) / cols;
+  const perCol = Math.ceil(chapters.length / cols);
+  const rowH = Math.min(0.95, (CONTENT_BOTTOM - CONTENT_TOP) / Math.max(1, perCol));
+  chapters.forEach((ch, i) => {
+    const col = Math.floor(i / perCol);
+    const x = CONTENT_X + col * (colW + gutter);
+    const y = CONTENT_TOP + (i % perCol) * rowH;
+    const sq = Math.min(0.5, rowH - 0.25);
+    slide.addShape("rect", { x, y: y + 0.05, w: sq, h: sq, fill: { color: SUNSHINE }, line: { type: "none" } });
+    slide.addText(String(ch.number).padStart(2, "0"), {
+      x, y: y + 0.05, w: sq, h: sq, align: "center", valign: "middle", margin: 0,
+      fontFace: HEAD_FONT, fontSize: 14, color: CHARCOAL,
+    });
+    slide.addText(ch.name, {
+      x: x + sq + 0.2, y, w: colW - sq - 1.0, h: 0.36, margin: 0, valign: "middle",
+      fontFace: HEAD_FONT, fontSize: 15, color: CHARCOAL, fit: "shrink",
+    });
+    slide.addText(ch.sections.join("  ·  "), {
+      x: x + sq + 0.2, y: y + 0.36, w: colW - sq - 1.0, h: rowH - 0.5, margin: 0, valign: "top",
+      fontFace: BODY_FONT, fontSize: 10, color: MUTED, fit: "shrink",
+    });
+    slide.addText(String(ch.page).padStart(2, "0"), {
+      x: x + colW - 0.7, y, w: 0.7, h: 0.36, margin: 0, align: "right", valign: "middle",
+      fontFace: HEAD_FONT, fontSize: 14, color: FM_BLUE,
+    });
+    slide.addShape("rect", { x, y: y + rowH - 0.1, w: colW, h: 0.01, fill: { color: HAIRLINE }, line: { type: "none" } });
+  });
+}
+
+/**
+ * A chapter divider, after the reference deck's: the deck's black-and-white
+ * photograph under the band, an orange block across its lower left carrying
+ * the chapter number and name in spaced serif capitals, a navy strip beneath.
+ */
+function renderDivider(
+  slide: pptxgen.Slide,
+  number: number,
+  chapter: string,
+  pageNum: number,
+  panelPhoto: string,
+  sitePhoto: boolean
+) {
+  slide.background = { color: WHITE };
+  band(slide);
+  slide.addImage({ path: panelPhoto, ...PHOTO_PANEL });
+  {
+    const w = 2.0;
+    if (sitePhoto) {
+      slide.addShape("rect", { x: 12.55 - w - 0.15, y: 0.75, w: w + 0.3, h: w / COLOR_LOGO_RATIO + 0.3, fill: { color: WHITE }, line: { type: "none" } });
+    }
+    slide.addImage({ path: brandLogo(false), x: 12.55 - w, y: 0.9, w, h: w / COLOR_LOGO_RATIO });
+  }
+  slide.addShape("rect", { x: 0, y: 4.64, w: 9.28, h: 2.13, fill: { color: SUNSHINE }, line: { type: "none" } });
+  slide.addShape("rect", { x: 0, y: 6.77, w: 9.29, h: 0.73, fill: { color: FM_BLUE }, line: { type: "none" } });
+  slide.addText(String(number).padStart(2, "0"), {
+    x: 0.76, y: 4.78, w: 2, h: 0.45, margin: 0, valign: "middle",
+    fontFace: HEAD_FONT, fontSize: 18, color: CHARCOAL, charSpacing: 3,
+  });
+  slide.addText(chapter.toUpperCase(), {
+    x: 0.76, y: 5.2, w: 8.2, h: 1.4, margin: 0, valign: "middle", fit: "shrink",
+    fontFace: HEAD_FONT, fontSize: 36, color: CHARCOAL, charSpacing: 5,
+  });
+  pageSquare(slide, pageNum);
 }
 
 function renderKpis(
@@ -847,54 +956,32 @@ export async function generateDeck(
   });
   pageSquare(cover, 1);
 
-  // ---- At a glance ----
-  let pageNum = 2;
-  const glance = pres.addSlide();
-  chrome(glance, "This Month at a Glance", pageNum++);
-  glance.addText(deck.summary.headline, {
-    x: CONTENT_X, y: CONTENT_TOP, w: CONTENT_W, h: 0.85,
-    fontFace: HEAD_FONT, fontSize: 17, color: FM_BLUE, valign: "top",
-  });
-  glance.addShape("rect", { x: CONTENT_X, y: CONTENT_TOP + 0.95, w: CONTENT_W, h: 0.02, fill: { color: HAIRLINE }, line: { type: "none" } });
-  deck.summary.points.slice(0, 5).forEach((pt, i) => {
-    const y = CONTENT_TOP + 1.2 + i * 0.62;
-    glance.addShape("rect", { x: CONTENT_X, y: y + 0.08, w: 0.09, h: 0.32, fill: { color: SUNSHINE }, line: { type: "none" } });
-    glance.addText(pt, {
-      x: CONTENT_X + 0.28, y, w: CONTENT_W - 0.28, h: 0.5,
-      fontFace: BODY_FONT, fontSize: 12.5, color: SLATE, valign: "middle",
-    });
-  });
-
-  // ---- Contents ----
-  // The house decks open with one, and it is the slide that tells a client
-  // what the month actually covered before they start paging through it.
-  const contents = pres.addSlide();
-  chrome(contents, `Contents — ${prettyMonth(reportMonth)}`, pageNum++);
-  {
-    const labels = deck.sections.map((s) => s.label);
-    const cols = labels.length > 8 ? 2 : 1;
-    const perCol = Math.ceil(labels.length / cols);
-    const colW = (CONTENT_W - 0.6) / cols;
-    labels.forEach((label, i) => {
-      const col = Math.floor(i / perCol);
-      const row = i % perCol;
-      const x = CONTENT_X + col * (colW + 0.6);
-      const y = CONTENT_TOP + 0.1 + row * 0.46;
-      slide_contentsRow(contents, label, x, y, colW);
-    });
-  }
-
-  // ---- One slide per parameter, continued onto another where it overflows ----
-  for (const section of deck.sections) {
-    // No placeholder branch: Claude omits parameters with no real content,
-    // so anything reaching here has genuine blocks to render. A shorter
-    // deck of real substance beats a fixed structure full of holes.
-    for (const page of sectionSlides(section)) {
+  // ---- Everything between the cover and the closing slide, from the outline ----
+  // Built from deckOutline, the same list the preview draws and the generate
+  // route counts, so a divider or a page number cannot differ between them.
+  const outline = deckOutline(deck.sections);
+  for (let i = 0; i < outline.length; i++) {
+    const page = outline[i];
+    const pageNum = i + 1;
+    if (page.kind === "glance") {
       const slide = pres.addSlide();
-      chrome(slide, page.label, pageNum++);
+      chrome(slide, "This Month at a Glance", pageNum);
+      renderGlance(slide, deck.summary);
+    } else if (page.kind === "contents") {
+      const slide = pres.addSlide();
+      chrome(slide, `Contents — ${prettyMonth(reportMonth)}`, pageNum);
+      renderContents(slide, page.chapters);
+    } else if (page.kind === "divider") {
+      renderDivider(pres.addSlide(), page.number, page.chapter, pageNum, panelPhoto, !!coverPhoto);
+    } else if (page.kind === "section") {
+      // No placeholder branch: Claude omits parameters with no real content,
+      // so anything reaching here has genuine blocks to render.
+      const slide = pres.addSlide();
+      chrome(slide, page.label, pageNum);
       await renderRows(slide, page.rows, sessionDir, images);
     }
   }
+  const pageNum = outline.length;
 
   // ---- Thank you ----
   // The reference closing slide: the same black-and-white photograph as the
