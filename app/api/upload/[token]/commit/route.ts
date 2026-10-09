@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { resolveToken, TokenError } from "@/lib/resolve-token";
 import { createServiceClient } from "@/lib/supabase/service";
 import { loadDeck } from "@/lib/session";
+import { fileFinalDeck } from "@/lib/file-deck";
 
 export const maxDuration = 120;
 
@@ -31,70 +32,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       });
     if (upload.error) storageWarning = upload.error.message;
 
-    // Column names verified against the live schema: it's source_filename
-    // (not file_name), and source_id is NOT NULL and UNIQUE with no
-    // default, so it has to be supplied.
-    //
+    // One latest final deck per site and month; see lib/file-deck.ts.
     // Committing twice is reachable: if the mmr_status write below fails,
     // this route returns 500 without burning the token, so the submitter can
-    // press Confirm again. The table carries `is_latest`, so a new deck
-    // supersedes the old one rather than replacing it, and exactly one final
-    // deck per site and month should be the latest.
-    //
-    // The new row is written first and only rows older than it are retired
-    // afterwards. The other order - retire, then insert - left the month
-    // with no latest deck at all whenever the insert failed, and two
-    // concurrent commits each retired nothing of the other's and both stayed
-    // latest. Now a failed insert changes nothing, and of two commits the
-    // newer row - the higher id, which the database assigns at insert -
-    // always retires the older, whichever finishes first. Making it atomic
-    // outright needs a transaction, which the REST client cannot open; the
-    // window left is two inserts whose ids and commits land in opposite
-    // orders within the same instant.
-    const { data: inserted, error: regError } = await supabase
-      .from("document_registry")
-      .insert({
-        source_id: crypto.randomUUID(),
-        submission_id: submissionId,
-        site_id: resolved.siteId,
-        report_month: resolved.reportMonth,
-        source_filename: `MMR_${resolved.reportMonth}.pptx`,
-        file_type: "pptx",
-        format_role: "final_deck",
-        review_status: "approved",
-        ingestion_status: "success",
-        is_latest: true,
-        storage_path: storageWarning ? null : storagePath,
-      })
-      .select("id")
-      .single();
-    if (regError || !inserted) {
-      return NextResponse.json(
-        { error: `Couldn't register the deck: ${regError?.message ?? "no row returned"}` },
-        { status: 500 }
-      );
-    }
-
-    const { error: supersedeError } = await supabase
-      .from("document_registry")
-      .update({ is_latest: false })
-      .eq("site_id", resolved.siteId)
-      .eq("report_month", resolved.reportMonth)
-      // Final decks only. The registry also holds the source files and
-      // other formats for the month, each with its own is_latest, and those
-      // are not superseded by a new deck.
-      .eq("format_role", "final_deck")
-      .eq("is_latest", true)
-      .lt("id", inserted.id);
-    if (supersedeError) {
-      // The new deck is registered and correct; the older one is still
-      // flagged latest beside it. Reported rather than failed, for the same
-      // reason as the token burn below - the month is filed.
-      console.error("[commit] filed, but the previous deck record could not be superseded", {
-        siteId: resolved.siteId,
-        reportMonth: resolved.reportMonth,
-        error: supersedeError.message,
-      });
+    // press Confirm again, and the new deck supersedes the earlier one.
+    const filed = await fileFinalDeck(supabase, {
+      siteId: resolved.siteId,
+      reportMonth: resolved.reportMonth,
+      submissionId,
+      storagePath: storageWarning ? null : storagePath,
+    });
+    if (!filed.ok) return NextResponse.json({ error: filed.error }, { status: 500 });
+    if (filed.warning) {
+      console.error("[commit] filed, but", { siteId: resolved.siteId, reportMonth: resolved.reportMonth, warning: filed.warning });
     }
 
     // This single write is what makes Agent 0 stop chasing this site -
