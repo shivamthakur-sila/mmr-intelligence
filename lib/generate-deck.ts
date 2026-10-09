@@ -4,23 +4,27 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import type { CuratedDeck, Block } from "./curate";
-import { axisDecimals, chartPalette, decimalsNeeded, niceAxis, numberFormatCode } from "./chart-style";
+import { axisDecimals, chartPalette, decimalsNeeded, indianFigures, niceAxis, numberFormatCode } from "./chart-style";
 import {
-  BLOCK_SPACING,
-  CHART_MAX_H,
-  CHART_MIN_H,
-  CONTENT_BOTTOM,
   CONTENT_TOP,
   CONTENT_W,
+  FOOTNOTE_SIZE,
+  KPI_CARD_MAX_W,
+  KPI_ROW_H,
+  KPI_STACK_CARD_H,
+  KPI_STACK_GAP,
   SPLIT_GUTTER,
-  SPLIT_W,
   type PhotoGeometry,
   type Row,
-  photoGeometry,
-  photosMinHeight,
-  rowIsFlexible,
-  rowMinHeight,
+  blockHeight,
+  footnoteHeight,
+  identifierColumns,
+  numericColumns,
+  placeRows,
   sectionSlides,
+  splitRightW,
+  tableGeometry,
+  tableType,
 } from "./deck-layout";
 
 // FM service-line palette. The parent SILA guide assigns Blue #264170 to
@@ -46,8 +50,6 @@ const HEAD_FONT = "Georgia";
 const BODY_FONT = "Trebuchet MS";
 
 const SLIDE_W = 13.333;
-// Card height for a KPI row; deck-layout costs the block at the same figure.
-const KPI_H = 1.15;
 const CONTENT_X = 0.6;
 
 type ImageRecord = {
@@ -118,6 +120,35 @@ export async function coverPreviewDataUrl(
   } catch {
     return null;
   }
+}
+
+/**
+ * Small copies of every photo the deck's grids use, keyed by id, for the
+ * browser preview. It drew grey "photo" boxes, so the submitter approved
+ * photo slides without seeing which photographs were on them.
+ */
+export async function photoPreviewDataUrls(
+  deck: CuratedDeck,
+  images: ImageRecord[],
+  sessionDir: string
+): Promise<Record<string, string>> {
+  const used = new Set(
+    deck.sections.flatMap((s) => s.blocks.flatMap((b) => (b.type === "photos" ? b.imageIds : [])))
+  );
+  const out: Record<string, string> = {};
+  for (const im of images) {
+    if (!used.has(im.id)) continue;
+    try {
+      const jpeg = await sharp(path.join(sessionDir, im.file))
+        .resize({ width: 360, height: 360, fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 68 })
+        .toBuffer();
+      out[im.id] = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+    } catch {
+      // A preview without one thumbnail still shows the tile.
+    }
+  }
+  return out;
 }
 
 export function chooseCoverPhoto(
@@ -243,30 +274,38 @@ function slide_contentsRow(slide: pptxgen.Slide, label: string, x: number, y: nu
   });
 }
 
-function renderKpis(slide: pptxgen.Slide, items: { label: string; value: string }[], y: number) {
+function renderKpis(
+  slide: pptxgen.Slide,
+  items: { label: string; value: string }[],
+  x: number,
+  y: number,
+  w: number,
+  stacked: boolean
+) {
   // Carded like the house decks: a bordered panel with an orange edge and
-  // the figure set large. The brand guide calls for stat callouts far bigger
-  // than body copy, and at 22pt in a flat grey box these read as footnotes.
+  // the figure set large. In a row each card is capped in width and the row
+  // starts at the left edge; beside a table or chart the cards stack into a
+  // column. Values are regrouped the Indian way for display only.
   const shown = items.slice(0, 4);
-  const gap = 0.22;
-  const w = (CONTENT_W - gap * (shown.length - 1)) / shown.length;
-  shown.forEach((kpi, i) => {
-    const x = CONTENT_X + i * (w + gap);
-    slide.addShape("rect", {
-      x, y, w, h: KPI_H,
-      fill: { color: WHITE },
-      line: { color: HAIRLINE, width: 1 },
-    });
-    slide.addShape("rect", { x, y, w: 0.07, h: KPI_H, fill: { color: SUNSHINE }, line: { type: "none" } });
-    slide.addText(kpi.value, {
-      x: x + 0.24, y: y + 0.12, w: w - 0.36, h: 0.6,
-      fontFace: HEAD_FONT, fontSize: 30, color: FM_BLUE, valign: "middle", shrinkText: true,
+  const card = (kx: number, ky: number, kw: number, kh: number, kpi: { label: string; value: string }) => {
+    slide.addShape("rect", { x: kx, y: ky, w: kw, h: kh, fill: { color: WHITE }, line: { color: HAIRLINE, width: 1 } });
+    slide.addShape("rect", { x: kx, y: ky, w: 0.07, h: kh, fill: { color: SUNSHINE }, line: { type: "none" } });
+    slide.addText(indianFigures(kpi.value), {
+      x: kx + 0.24, y: ky + 0.1, w: kw - 0.36, h: kh * 0.55,
+      fontFace: HEAD_FONT, fontSize: stacked ? 26 : 30, color: FM_BLUE, valign: "middle", fit: "shrink",
     });
     slide.addText(kpi.label.toUpperCase(), {
-      x: x + 0.26, y: y + 0.74, w: w - 0.38, h: 0.3,
-      fontFace: BODY_FONT, fontSize: 9, color: MUTED, charSpacing: 1.2, valign: "middle",
+      x: kx + 0.26, y: ky + kh * 0.62, w: kw - 0.38, h: kh * 0.3,
+      fontFace: BODY_FONT, fontSize: 8.5, color: MUTED, charSpacing: 1.2, valign: "middle", fit: "shrink",
     });
-  });
+  };
+  if (stacked) {
+    shown.forEach((kpi, i) => card(x, y + i * (KPI_STACK_CARD_H + KPI_STACK_GAP), w, KPI_STACK_CARD_H, kpi));
+    return;
+  }
+  const gap = 0.22;
+  const cw = Math.min(KPI_CARD_MAX_W, (w - gap * (shown.length - 1)) / shown.length);
+  shown.forEach((kpi, i) => card(x + i * (cw + gap), y, cw, KPI_ROW_H, kpi));
 }
 
 /**
@@ -293,11 +332,20 @@ function renderChart(
   const valueFormat = numberFormatCode(decimalsNeeded(all));
   const unit = typeof b.unit === "string" ? b.unit.trim() : "";
 
+  // A footnote takes its own lines under the plot.
+  const footH = footnoteHeight(b.footnote, w);
+  if (b.footnote) {
+    slide.addText(b.footnote, {
+      x, y: y + h - footH + 0.04, w, h: footH, margin: [0, 2, 0, 2],
+      fontFace: BODY_FONT, fontSize: FOOTNOTE_SIZE, italic: true, color: MUTED, valign: "top",
+    });
+  }
+
   const common = {
     x,
     y,
     w,
-    h,
+    h: h - footH,
     showTitle: !!b.title,
     title: b.title ?? "",
     titleColor: SLATE,
@@ -386,7 +434,13 @@ function renderChart(
         valAxisTitleColor: MUTED,
         valAxisTitleFontFace: BODY_FONT,
         valAxisTitleFontSize: compact ? 8 : 9,
-        showValue: false,
+        // A short trend carries its figures on the points, as the house
+        // decks label theirs; a long one would crowd them.
+        showValue: !compact && b.categories.length <= 6 && b.series.length <= 2,
+        dataLabelPosition: "t",
+        dataLabelFormatCode: valueFormat,
+        dataLabelFontSize: 9,
+        dataLabelColor: SLATE,
       }
     );
     return;
@@ -443,6 +497,19 @@ function renderChart(
   });
 }
 
+// Status words a source writes into a cell, coloured as the reference's
+// tracker tables colour them: the word stays, the fill only marks it. Only a
+// whole-cell match counts, and no status is ever inferred - a date is never
+// turned into "expired" here.
+const STATUS_FILLS: { test: RegExp; fill: string; color: string }[] = [
+  { test: /^(completed?|done|closed|ok|okay|working|valid|available|resolved|approved|active|renewed)$/i, fill: "E4F2E7", color: "1E6B34" },
+  { test: /^(pending|open|in progress|wip|ongoing|scheduled|under process|due)$/i, fill: "FDF0D9", color: "8A5A00" },
+  { test: /^(overdue|expired|not done|not working|failed|rejected|breakdown|out of order)$/i, fill: "F9E1E1", color: "9B2C2C" },
+];
+
+/** Category band rows: a pale navy tint, so they no longer read as a second header. */
+const BAND_FILL = "E8EDF4";
+
 function renderTable(
   slide: pptxgen.Slide,
   b: Extract<Block, { type: "table" }>,
@@ -450,27 +517,44 @@ function renderTable(
   x: number = CONTENT_X,
   w: number = CONTENT_W
 ) {
-  const headerRow = b.headers.map((h) => ({
+  const geo = tableGeometry(b, w);
+  const type = tableType(b);
+  const numeric = numericColumns(b);
+  const ids = identifierColumns(b);
+  const align = (c: number) => (numeric[c] ? ("right" as const) : ("left" as const));
+
+  const headerRow = b.headers.map((h, c) => ({
     text: h,
-    options: { fill: { color: FM_BLUE }, color: WHITE, bold: true, fontSize: 10.5, fontFace: BODY_FONT },
+    options: {
+      fill: { color: FM_BLUE }, color: WHITE, bold: true, fontSize: type.header, fontFace: BODY_FONT,
+      align: align(c), valign: "middle" as const,
+    },
   }));
+
+  const body: pptxgen.TableRow[] = b.rows.map((row) =>
+    row.map((cell, c) => {
+      const raw = String(cell ?? "");
+      const status = STATUS_FILLS.find((s) => s.test.test(raw.trim()));
+      return {
+        // Figures regrouped for display only (10,03,500); identifiers as typed.
+        text: numeric[c] && !ids[c] ? indianFigures(raw) : raw,
+        options: {
+          fontSize: type.body, fontFace: BODY_FONT, color: status?.color ?? SLATE, align: align(c), valign: "middle" as const,
+          ...(status ? { fill: { color: status.fill }, bold: true } : {}),
+        },
+      };
+    })
+  );
 
   // Insert group band rows at their stated positions, walking from the
   // bottom up so earlier insertions don't shift later indexes.
-  const body: pptxgen.TableRow[] = b.rows.map((row) =>
-    row.map((cell) => ({
-      text: String(cell ?? ""),
-      options: { fontSize: 10, fontFace: BODY_FONT, color: SLATE },
-    }))
-  );
-
   const groups = [...(b.groups ?? [])].sort((a, b2) => b2.afterRow - a.afterRow);
   for (const g of groups) {
     const band: pptxgen.TableRow = [
       {
         text: g.label,
         options: {
-          fill: { color: FM_BLUE }, color: WHITE, bold: true, fontSize: 10,
+          fill: { color: BAND_FILL }, color: FM_BLUE, bold: true, fontSize: type.body,
           fontFace: BODY_FONT, colspan: b.headers.length,
         },
       },
@@ -479,22 +563,34 @@ function renderTable(
     body.splice(at, 0, band);
   }
 
+  // A roomy table is drawn at the row heights the layout measured, so its
+  // extra padding is real; otherwise rows size to their text.
+  let rowH: number[] | undefined;
+  if (b.roomy) {
+    const bodyHs = [...geo.rowHs];
+    const bandsAt = [...(b.groups ?? [])]
+      .map((g, k) => ({ at: Math.max(0, Math.min(g.afterRow, b.rows.length)), h: geo.bandHs[k] }))
+      .sort((p, q) => q.at - p.at);
+    for (const band of bandsAt) bodyHs.splice(band.at, 0, band.h);
+    rowH = [geo.headerH, ...bodyHs];
+  }
+
   slide.addTable([headerRow, ...body], {
-    x, y, w, autoPage: false,
+    x, y, w, colW: geo.widths, autoPage: false,
+    ...(rowH ? { rowH } : {}),
     border: { type: "solid", color: HAIRLINE, pt: 0.5 },
   });
+
+  if (b.footnote) {
+    const fh = footnoteHeight(b.footnote, w);
+    slide.addText(b.footnote, {
+      x, y: y + geo.total + 0.04, w, h: fh, margin: [0, 2, 0, 2],
+      fontFace: BODY_FONT, fontSize: FOOTNOTE_SIZE, italic: true, color: MUTED, valign: "top",
+    });
+  }
 }
 
 
-/**
- * Centre-crops an image to an exact aspect ratio and returns the new path.
- *
- * This exists because pptxgenjs's `sizing` option cannot be relied on: when
- * `w` and `h` are both supplied it is ignored outright and the image is
- * simply stretched to fill the box. Verified by rendering a known circle
- * through every combination - only a box matching the image's own ratio
- * came out undistorted. So the image is made to match the box instead.
- */
 /**
  * Where derived copies of an image go. Session photos are already in this
  * invocation's temp folder; a bundled asset is not, and the deployment's own
@@ -505,7 +601,16 @@ function workDirFor(srcPath: string): string {
   return path.resolve(srcPath).startsWith(tmp) ? path.dirname(srcPath) : tmp;
 }
 
-async function cropToRatio(srcPath: string, ratio: number, tag: string): Promise<string> {
+/**
+ * Centre-crops an image to an exact aspect ratio and returns the new path.
+ *
+ * This exists because pptxgenjs's `sizing` option cannot be relied on: when
+ * `w` and `h` are both supplied it is ignored outright and the image is
+ * simply stretched to fill the box. Verified by rendering a known circle
+ * through every combination - only a box matching the image's own ratio
+ * came out undistorted. So the image is made to match the box instead.
+ */
+async function cropToRatio(srcPath: string, ratio: number, tag: string, attention = false): Promise<string> {
   const out = path.join(workDirFor(srcPath), `crop-${tag}-${path.basename(srcPath)}`);
   if (fs.existsSync(out)) return out;
   try {
@@ -515,7 +620,12 @@ async function cropToRatio(srcPath: string, ratio: number, tag: string): Promise
     const croppable = Math.min(meta.width ?? 1600, (meta.height ?? 1600) * ratio);
     const width = Math.max(1, Math.round(Math.min(1600, croppable)));
     await sharp(srcPath)
-      .resize({ width, height: Math.max(1, Math.round(width / ratio)), fit: "cover", position: "centre" })
+      .resize({
+        width,
+        height: Math.max(1, Math.round(width / ratio)),
+        fit: "cover",
+        position: attention ? sharp.strategy.attention : "centre",
+      })
       .jpeg({ quality: 82 })
       .toFile(out);
     return out;
@@ -546,6 +656,8 @@ async function toGrayscale(srcPath: string): Promise<string> {
 async function renderPhotos(
   slide: pptxgen.Slide,
   imageIds: string[],
+  x: number,
+  w: number,
   y: number,
   geo: PhotoGeometry,
   sessionDir: string,
@@ -559,16 +671,20 @@ async function renderPhotos(
 
   const gap = 0.18;
   const gridW = geo.cols * geo.w + (geo.cols - 1) * gap;
-  const startX = CONTENT_X + (CONTENT_W - gridW) / 2; // centre the grid
+  const startX = x + (w - gridW) / 2; // centre the grid in its band
 
   for (let i = 0; i < found.length; i++) {
     const im = found[i];
     const col = i % geo.cols;
     const row = Math.floor(i / geo.cols);
+    // Cropped around what draws the eye - the person, the equipment - not
+    // the geometric centre, which on a portrait shot cut into a landscape
+    // tile was often a wall.
     const cropped = await cropToRatio(
       path.join(sessionDir, im.file),
       geo.w / geo.h,
-      `${geo.cols}x${geo.rows}`
+      `tile${(geo.w / geo.h).toFixed(3)}`,
+      true
     );
     slide.addImage({
       path: cropped,
@@ -580,14 +696,14 @@ async function renderPhotos(
   }
 }
 
-/** Draws one block at a given position and width. */
+/** Draws one block at a given position and size. */
 async function renderBlock(
   slide: pptxgen.Slide,
   block: Block,
-  y: number,
-  h: number,
   x: number,
+  y: number,
   w: number,
+  h: number,
   geo: PhotoGeometry | undefined,
   sessionDir: string,
   images: ImageRecord[],
@@ -595,7 +711,7 @@ async function renderBlock(
 ) {
   switch (block.type) {
     case "kpis":
-      renderKpis(slide, block.items, y);
+      renderKpis(slide, block.items, x, y, w, w < CONTENT_W / 2);
       break;
     case "chart":
       renderChart(slide, block, y, h, x, w, compact);
@@ -606,7 +722,7 @@ async function renderBlock(
     case "narrative":
       slide.addText(block.text, {
         x, y, w, h,
-        fontFace: BODY_FONT, fontSize: 12.5, color: SLATE, valign: "top",
+        fontFace: BODY_FONT, fontSize: 12.5, color: SLATE, valign: "top", lineSpacingMultiple: 1.1,
       });
       break;
     case "bullets":
@@ -615,11 +731,11 @@ async function renderBlock(
           text: t,
           options: { bullet: { characterCode: "2022" }, breakLine: true },
         })),
-        { x: x + 0.1, y, w: w - 0.1, h, fontFace: BODY_FONT, fontSize: 12, color: SLATE, valign: "top" }
+        { x: x + 0.1, y, w: w - 0.1, h, fontFace: BODY_FONT, fontSize: 12, color: SLATE, valign: "top", lineSpacingMultiple: 1.1 }
       );
       break;
     case "photos":
-      if (geo) await renderPhotos(slide, block.imageIds, y, geo, sessionDir, images);
+      if (geo) await renderPhotos(slide, block.imageIds, x, w, y, geo, sessionDir, images);
       break;
     case "note":
       // Dashed orange outline - the recurring container motif in the house
@@ -637,121 +753,34 @@ async function renderBlock(
   }
 }
 
-/**
- * Lays rows out in two passes: measure everything first, then start low enough
- * that the whole group sits centred in the content area. Stacking straight from
- * the top left slides looking bottom-heavy with a dead band underneath -
- * measuring first is what makes them read as composed.
- */
+/** Draws a slide's rows where lib/deck-layout's placeRows puts them. */
 async function renderRows(
   slide: pptxgen.Slide,
   rows: Row[],
   sessionDir: string,
   images: ImageRecord[]
 ) {
-  // Same constant the planner measured with, so the two cannot disagree about
-  // what fits.
-  const spacing = BLOCK_SPACING;
-  const areaH = CONTENT_BOTTOM - CONTENT_TOP;
-
-  type Measured = { row: Row; h: number; leftGeo?: PhotoGeometry; geo?: PhotoGeometry };
-  const measured: Measured[] = [];
-  let fixedTotal = 0;
-
-  for (const row of rows) {
-    if (rowIsFlexible(row)) {
-      measured.push({ row, h: 0 });
-    } else {
-      const h = rowMinHeight(row);
-      fixedTotal += h;
-      measured.push({ row, h });
+  for (const { row, y, h, geo } of placeRows(rows)) {
+    if (row.kind === "full") {
+      if (row.block.type === "photos" && !geo) {
+        // The planner reserved this grid's minimum, so this should not
+        // happen; if it does, say so rather than lose the photographs quietly.
+        console.warn(`[deck] photo grid of ${row.block.imageIds.length} not drawn: ${h.toFixed(2)}in available`);
+      }
+      await renderBlock(slide, row.block, CONTENT_X, y, CONTENT_W, h, geo, sessionDir, images);
+      continue;
     }
-  }
-  const gaps = spacing * Math.max(0, rows.length - 1);
-  let flexBudget = areaH - fixedTotal - gaps;
-
-  // Flexible rows take their minimum first, then share out whatever is left.
-  // Sizing a split row to its minimum was the bug preflight found next: a
-  // three-row table set the band at an inch and a half, so the chart beside it
-  // stayed a strip and its data labels wrapped mid-number. A split row should
-  // fill the space it has.
-  const isChartRow = (m: Measured) => m.row.kind === "full" && m.row.block.type === "chart";
-  const isPhotoRow = (m: Measured) => m.row.kind === "full" && m.row.block.type === "photos";
-  const isSplitRow = (m: Measured) => m.row.kind === "split";
-
-  const growable = measured.filter((m) => isSplitRow(m) || isChartRow(m));
-  const photoBlock = (m: Measured) =>
-    (m.row as { kind: "full"; block: Block }).block as Extract<Block, { type: "photos" }>;
-  // Each grid's real minimum, so a chart growing into the spare space cannot
-  // leave a grid less room than it needs to be drawn at all.
-  const photoReserve = measured
-    .filter(isPhotoRow)
-    .reduce((sum, m) => sum + photosMinHeight(photoBlock(m).imageIds.length), 0);
-
-  for (const m of growable) {
-    m.h = Math.max(CHART_MIN_H, rowMinHeight(m.row));
-    flexBudget -= m.h;
-  }
-
-  // Share the remainder, capped per kind: a chart on its own should not
-  // balloon across a whole slide, but a chart paired with its table should
-  // take the full band.
-  let spare = Math.max(0, flexBudget - photoReserve);
-  for (let i = 0; i < growable.length && spare > 0.01; i++) {
-    const m = growable[i];
-    const ceiling = isSplitRow(m) ? areaH : CHART_MAX_H;
-    const room = Math.max(0, ceiling - m.h);
-    const give = Math.min(room, spare / (growable.length - i));
-    m.h += give;
-    spare -= give;
-    flexBudget -= give;
-  }
-
-  // Photo grids share what is left: each first gets its own minimum, then the
-  // excess is split between them. The first grid used to be handed the whole
-  // remainder, so a second grid on the same slide got nothing and was not
-  // drawn; an equal split is no better when the grids differ, since a
-  // six-photo grid needs more room than a three-photo one.
-  const photoRows = measured.filter(isPhotoRow);
-  let excess = flexBudget - photoReserve;
-  let photoRowsLeft = photoRows.length;
-  for (const m of photoRows) {
-    const block = photoBlock(m);
-    const min = photosMinHeight(block.imageIds.length);
-    const share = min + Math.max(0, excess) / Math.max(1, photoRowsLeft);
-    photoRowsLeft--;
-    const geo = photoGeometry(Math.min(block.imageIds.length, 6), share);
-    if (geo) {
-      m.geo = geo;
-      m.h = geo.used;
-      flexBudget -= geo.used;
-      excess -= Math.max(0, geo.used - min);
-    } else {
-      // The planner reserved this grid's minimum, so this should not happen;
-      // if it does, say so rather than lose the photographs quietly.
-      console.warn(`[deck] photo grid of ${block.imageIds.length} not drawn: ${share.toFixed(2)}in available`);
-    }
-  }
-
-  const total = measured.reduce((sum, m) => sum + m.h, 0) + gaps;
-  let y = CONTENT_TOP + Math.max(0, (areaH - total) / 2);
-
-  for (const m of measured) {
-    if (m.h === 0 && rowIsFlexible(m.row)) continue;
-
-    if (m.row.kind === "full") {
-      await renderBlock(slide, m.row.block, y, m.h, CONTENT_X, CONTENT_W, m.geo, sessionDir, images);
-    } else {
-      await renderBlock(slide, m.row.left, y, m.h, CONTENT_X, SPLIT_W, undefined, sessionDir, images, true);
-      await renderBlock(
-        slide, m.row.right, y, m.h,
-        CONTENT_X + SPLIT_W + SPLIT_GUTTER, SPLIT_W,
-        undefined, sessionDir, images, true
-      );
-    }
-    y += m.h + spacing;
+    const rightW = splitRightW(row);
+    await renderBlock(slide, row.left, CONTENT_X, y, row.leftW, h, undefined, sessionDir, images, row.right.type === "table");
+    await renderBlock(
+      slide, row.right, CONTENT_X + row.leftW + SPLIT_GUTTER, y, rightW,
+      // A table beside KPIs keeps its own height; a chart takes the band.
+      row.right.type === "chart" ? h : Math.max(blockHeight(row.right, rightW), h),
+      undefined, sessionDir, images, row.left.type === "chart"
+    );
   }
 }
+
 
 export async function generateDeck(
   deck: CuratedDeck,

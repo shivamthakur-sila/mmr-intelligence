@@ -2,8 +2,28 @@
 
 import { useState } from "react";
 import type { CuratedDeck, Block } from "@/lib/curate";
-import { deckOutline, type OutlineSlide, type Row } from "@/lib/deck-layout";
-import { chartPalette, decimalsNeeded, formatNumber, niceAxis } from "@/lib/chart-style";
+import {
+  CONTENT_W,
+  KPI_CARD_MAX_W,
+  KPI_ROW_H,
+  KPI_STACK_CARD_H,
+  KPI_STACK_GAP,
+  SPLIT_GUTTER,
+  deckOutline,
+  identifierColumns,
+  numericColumns,
+  placeRows,
+  splitRightW,
+  tableGeometry,
+  tableType,
+  type OutlineSlide,
+  type PhotoGeometry,
+  type Row,
+} from "@/lib/deck-layout";
+import { chartPalette, decimalsNeeded, formatNumber, indianFigures, niceAxis } from "@/lib/chart-style";
+
+/** Left edge of the content area, in the renderer's inches (CONTENT_X there). */
+const CONTENT_X = 0.6;
 
 /**
  * Renders the curated spec as HTML slides at 16:9, mirroring the pptx
@@ -17,6 +37,7 @@ export default function DeckPreview({
   siteName,
   reportMonth,
   coverImage = null,
+  photos = {},
   initialSlide = 0,
 }: {
   deck: CuratedDeck;
@@ -24,6 +45,8 @@ export default function DeckPreview({
   reportMonth: string;
   /** The site photo the deck's cover uses, or null for SILA's building. */
   coverImage?: string | null;
+  /** Small copies of the photos the deck's grids use, by id. */
+  photos?: Record<string, string>;
   /** The slide shown first; 0, the cover, unless a caller needs another. */
   initialSlide?: number;
 }) {
@@ -40,12 +63,20 @@ export default function DeckPreview({
     <div>
       <div
         className="relative w-full overflow-hidden rounded-lg"
-        style={{ aspectRatio: "16 / 9", background: "#fff", border: "1px solid var(--hairline)" }}
+        // Sizes inside are in container units of this box, so type and spacing
+        // keep the deck's proportions at any width.
+        style={{
+          aspectRatio: "16 / 9",
+          background: "#fff",
+          border: "1px solid var(--hairline)",
+          containerType: "inline-size",
+          fontFamily: '"Trebuchet MS", var(--sans)',
+        }}
       >
         {current.kind === "cover" && <CoverSlide siteName={siteName} reportMonth={reportMonth} photo={coverImage} />}
         {current.kind === "glance" && <GlanceSlide summary={deck.summary} page={i + 1} />}
         {current.kind === "contents" && <ContentsSlide labels={current.labels} reportMonth={reportMonth} page={i + 1} />}
-        {current.kind === "section" && <SectionSlide page={current} pageNumber={i + 1} />}
+        {current.kind === "section" && <SectionSlide page={current} pageNumber={i + 1} photos={photos} />}
         {current.kind === "closing" && <ClosingSlide page={i + 1} photo={coverImage} />}
       </div>
 
@@ -118,7 +149,18 @@ function PageSquare({ n }: { n: number }) {
   );
 }
 
-function Chrome({ title, page, children }: { title: string; page: number; children: React.ReactNode }) {
+function Chrome({
+  title,
+  page,
+  children,
+  bare = false,
+}: {
+  title: string;
+  page: number;
+  children: React.ReactNode;
+  /** True when the children place themselves in slide inches. */
+  bare?: boolean;
+}) {
   return (
     <div className="absolute inset-0">
       <Band />
@@ -126,15 +168,19 @@ function Chrome({ title, page, children }: { title: string; page: number; childr
       <img src="/sila-fm-logo-color.png" alt="SILA" style={{ ...box(11.683, 0.9, 1.4, 0.595), objectFit: "contain" }} />
       <p
         className="flex items-center overflow-hidden whitespace-nowrap"
-        style={{ ...box(0.7, 0.92, 10.6, 0.66), fontFamily: "var(--serif)", color: CHARCOAL, fontSize: "clamp(13px, 2.3vw, 30px)" }}
+        style={{ ...box(0.7, 0.92, 10.6, 0.66), fontFamily: "var(--serif)", color: CHARCOAL, fontSize: `${(32 * 7.5) / 72}cqw` }}
       >
         {title}
       </p>
       <div style={{ ...box(0.7, 1.7, 1.11, 0.04), background: "var(--sun)" }} />
       <div style={{ ...box(13.226, 3.667, 0.107, 0.667), background: "#FFAF00" }} />
-      <div className="flex flex-col overflow-hidden" style={box(0.6, 1.95, 12.13, 4.75)}>
-        {children}
-      </div>
+      {bare ? (
+        children
+      ) : (
+        <div className="flex flex-col overflow-hidden" style={box(0.6, 1.95, 12.13, 4.75)}>
+          {children}
+        </div>
+      )}
       <PageSquare n={page} />
     </div>
   );
@@ -278,53 +324,88 @@ function ContentsSlide({ labels, reportMonth, page }: { labels: string[]; report
   );
 }
 
-function SectionSlide({ page, pageNumber }: { page: { label: string; rows: Row[] }; pageNumber: number }) {
+/** A font size in points on the 13.333in slide, as a share of the slide's width. */
+const pt = (n: number) => `${(n * 7.5) / 72}cqw`;
+/** A length in inches on the slide, as a share of its width. */
+const inch = (n: number) => `${n * 7.5}cqw`;
+const SLATE = "#2D2D2D";
+const MUTED = "#697784";
+
+// The same status fills the renderer uses: the source's word stays, the
+// colour only marks it.
+const STATUS_FILLS: { test: RegExp; fill: string; color: string }[] = [
+  { test: /^(completed?|done|closed|ok|okay|working|valid|available|resolved|approved|active|renewed)$/i, fill: "#E4F2E7", color: "#1E6B34" },
+  { test: /^(pending|open|in progress|wip|ongoing|scheduled|under process|due)$/i, fill: "#FDF0D9", color: "#8A5A00" },
+  { test: /^(overdue|expired|not done|not working|failed|rejected|breakdown|out of order)$/i, fill: "#F9E1E1", color: "#9B2C2C" },
+];
+
+/** A section slide: every block placed where the renderer places it. */
+function SectionSlide({
+  page,
+  pageNumber,
+  photos,
+}: {
+  page: { label: string; rows: Row[] };
+  pageNumber: number;
+  photos: Record<string, string>;
+}) {
   return (
-    <Chrome title={page.label} page={pageNumber}>
-      <div className="flex h-full flex-col gap-[2.5%]">
-        {page.rows.map((row, n) =>
-          row.kind === "full" ? (
-            <BlockView key={n} block={row.block} />
-          ) : (
-            // A chart and the table of the same figures, side by side - the
-            // arrangement the .pptx uses, so the preview shows the real slide.
-            <div key={n} className="flex min-h-0 flex-1 gap-[2.5%]">
-              <div className="flex min-h-0 w-1/2 flex-col">
-                <BlockView block={row.left} />
-              </div>
-              <div className="flex min-h-0 w-1/2 flex-col">
-                <BlockView block={row.right} />
-              </div>
+    <Chrome title={page.label} page={pageNumber} bare>
+      {placeRows(page.rows).map(({ row, y, h, geo }, n) =>
+        row.kind === "full" ? (
+          <div key={n} style={box(CONTENT_X, y, CONTENT_W, h)}>
+            <BlockView block={row.block} w={CONTENT_W} geo={geo} photos={photos} />
+          </div>
+        ) : (
+          <div key={n}>
+            <div style={box(CONTENT_X, y, row.leftW, h)}>
+              <BlockView block={row.left} w={row.leftW} photos={photos} />
             </div>
-          )
-        )}
-      </div>
+            <div style={box(CONTENT_X + row.leftW + SPLIT_GUTTER, y, splitRightW(row), h)}>
+              <BlockView block={row.right} w={splitRightW(row)} photos={photos} />
+            </div>
+          </div>
+        )
+      )}
     </Chrome>
   );
 }
 
-function BlockView({ block }: { block: Block }) {
-  const cell: React.CSSProperties = {
-    fontSize: "clamp(6px, 0.92vw, 10px)",
-    padding: "0.5% 0.9%",
-    borderBottom: "1px solid var(--hairline)",
-  };
-
+function BlockView({
+  block,
+  w,
+  geo,
+  photos,
+}: {
+  block: Block;
+  w: number;
+  geo?: PhotoGeometry;
+  photos: Record<string, string>;
+}) {
   if (block.type === "kpis") {
+    const shown = block.items.slice(0, 4);
+    const stacked = w < CONTENT_W / 2;
+    const cardW = stacked ? w : Math.min(KPI_CARD_MAX_W, (w - 0.22 * (shown.length - 1)) / shown.length);
+    const cardH = stacked ? KPI_STACK_CARD_H : KPI_ROW_H;
     return (
-      <div className="flex gap-[1.5%]">
-        {block.items.slice(0, 4).map((k, n) => (
+      <div className={stacked ? "flex flex-col" : "flex"} style={{ gap: inch(stacked ? KPI_STACK_GAP : 0.22) }}>
+        {shown.map((k, n) => (
           <div
             key={n}
-            className="flex-1 px-[2%] py-[1.5%]"
-            style={{ background: "#fff", border: "1px solid var(--hairline)", borderLeft: "4px solid var(--sun)" }}
+            className="flex flex-col justify-center overflow-hidden"
+            style={{
+              width: inch(cardW),
+              height: inch(cardH),
+              background: "#fff",
+              border: "1px solid var(--hairline)",
+              borderLeft: `${inch(0.07)} solid var(--sun)`,
+              paddingLeft: inch(0.17),
+            }}
           >
-            <p style={{ fontFamily: "var(--serif)", color: "var(--blue)", fontSize: "clamp(12px, 2.3vw, 24px)" }}>
-              {k.value}
+            <p className="whitespace-nowrap" style={{ fontFamily: "var(--serif)", color: "var(--blue)", fontSize: pt(stacked ? 26 : 30), lineHeight: 1.1 }}>
+              {indianFigures(k.value)}
             </p>
-            <p style={{ fontSize: "clamp(5.5px, 0.8vw, 8.5px)", color: "var(--muted)", letterSpacing: "0.08em" }}>
-              {k.label.toUpperCase()}
-            </p>
+            <p style={{ fontSize: pt(8.5), color: MUTED, letterSpacing: "0.1em", marginTop: inch(0.06) }}>{k.label.toUpperCase()}</p>
           </div>
         ))}
       </div>
@@ -332,72 +413,109 @@ function BlockView({ block }: { block: Block }) {
   }
 
   if (block.type === "table") {
-    const bands = new Map((block.groups ?? []).map((g) => [g.afterRow, g.label]));
+    const tg = tableGeometry(block, w);
+    const type = tableType(block);
+    const numeric = numericColumns(block);
+    const ids = identifierColumns(block);
+    const cell = (c: number): React.CSSProperties => ({
+      fontSize: pt(type.body),
+      padding: `${inch(type.pad * 0.3)} ${inch(0.1)}`,
+      lineHeight: 1.15,
+      borderBottom: "1px solid var(--hairline)",
+      textAlign: numeric[c] ? "right" : "left",
+      color: SLATE,
+      whiteSpace: "pre-line",
+      verticalAlign: "middle",
+    });
+    const bands = new Map((block.groups ?? []).map((g) => [Math.min(g.afterRow, block.rows.length), g.label]));
     const out: React.ReactNode[] = [];
+    const band = (ri: number) => {
+      if (!bands.has(ri)) return;
+      out.push(
+        <tr key={`band-${ri}`}>
+          <td colSpan={block.headers.length} style={{ ...cell(0), textAlign: "left", background: "#E8EDF4", color: "var(--blue)", fontWeight: 700 }}>
+            {bands.get(ri)}
+          </td>
+        </tr>
+      );
+    };
     block.rows.forEach((row, ri) => {
-      if (bands.has(ri)) {
-        out.push(
-          <tr key={`band-${ri}`}>
-            <td colSpan={block.headers.length} style={{ ...cell, background: "var(--blue)", color: "#fff", fontWeight: 600 }}>
-              {bands.get(ri)}
-            </td>
-          </tr>
-        );
-      }
+      band(ri);
       out.push(
         <tr key={`row-${ri}`}>
-          {row.map((c, ci) => (
-            <td key={ci} style={cell}>
-              {c}
-            </td>
-          ))}
+          {row.map((c, ci) => {
+            const status = STATUS_FILLS.find((s) => s.test.test(String(c).trim()));
+            return (
+              <td key={ci} style={{ ...cell(ci), ...(status ? { background: status.fill, color: status.color, fontWeight: 700 } : {}) }}>
+                {numeric[ci] && !ids[ci] ? indianFigures(String(c)) : c}
+              </td>
+            );
+          })}
         </tr>
       );
     });
-
+    band(block.rows.length);
     return (
-      <table className="w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
-        <thead>
-          <tr>
-            {block.headers.map((h, n) => (
-              <th key={n} style={{ ...cell, background: "var(--blue)", color: "#fff", textAlign: "left", fontWeight: 600 }}>
-                {h}
-              </th>
+      <div>
+        <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+          <colgroup>
+            {tg.widths.map((cw, n) => (
+              <col key={n} style={{ width: `${(cw / w) * 100}%` }} />
             ))}
-          </tr>
-        </thead>
-        <tbody>{out}</tbody>
-      </table>
+          </colgroup>
+          <thead>
+            <tr>
+              {block.headers.map((hd, n) => (
+                <th key={n} style={{ ...cell(n), fontSize: pt(type.header), background: "var(--blue)", color: "#fff", fontWeight: 700 }}>
+                  {hd}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>{out}</tbody>
+        </table>
+        {block.footnote && (
+          <p style={{ fontSize: pt(9), fontStyle: "italic", color: MUTED, marginTop: inch(0.04) }}>{block.footnote}</p>
+        )}
+      </div>
     );
   }
 
   if (block.type === "chart") {
-    return <ChartView block={block} />;
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ChartView block={block} />
+        </div>
+        {block.footnote && <p style={{ fontSize: pt(9), fontStyle: "italic", color: MUTED }}>{block.footnote}</p>}
+      </div>
+    );
   }
 
   if (block.type === "photos") {
+    if (!geo) return null;
+    const ids = block.imageIds.slice(0, 6);
     return (
-      <div className="grid gap-[1.5%]" style={{ gridTemplateColumns: `repeat(${Math.min(3, block.imageIds.length)}, 1fr)` }}>
-        {block.imageIds.slice(0, 6).map((_, n) => (
-          <div
-            key={n}
-            className="flex items-center justify-center"
-            style={{ background: "var(--wash)", aspectRatio: "4 / 3", fontSize: "clamp(5.5px, 0.8vw, 9px)", color: "var(--muted)" }}
-          >
-            photo
-          </div>
-        ))}
+      <div className="flex h-full justify-center">
+        <div className="grid content-start" style={{ gridTemplateColumns: `repeat(${geo.cols}, ${inch(geo.w)})`, gap: inch(0.18) }}>
+          {ids.map((id) =>
+            photos[id] ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img key={id} src={photos[id]} alt="" style={{ width: inch(geo.w), height: inch(geo.h), objectFit: "cover" }} />
+            ) : (
+              <div key={id} style={{ width: inch(geo.w), height: inch(geo.h), background: "var(--wash)" }} />
+            )
+          )}
+        </div>
       </div>
     );
   }
 
   if (block.type === "bullets") {
     return (
-      <ul className="space-y-[1.2%]">
+      <ul style={{ paddingLeft: inch(0.3), fontSize: pt(12), color: SLATE, lineHeight: 1.25, listStyle: "disc" }}>
         {block.items.map((t, n) => (
-          <li key={n} style={{ fontSize: "clamp(6.5px, 1vw, 11px)", lineHeight: 1.45 }}>
-            • {t}
-          </li>
+          <li key={n}>{t}</li>
         ))}
       </ul>
     );
@@ -405,18 +523,13 @@ function BlockView({ block }: { block: Block }) {
 
   if (block.type === "note") {
     return (
-      <p
-        className="px-[1.4%] py-[0.8%]"
-        style={{ fontSize: "clamp(5.5px, 0.85vw, 10px)", border: "1px dashed var(--sun)" }}
-      >
+      <p className="flex h-full items-center" style={{ fontSize: pt(10), color: SLATE, border: "1px dashed var(--sun)", padding: `0 ${inch(0.16)}` }}>
         {block.text}
       </p>
     );
   }
 
-  return (
-    <p style={{ fontSize: "clamp(6.5px, 1vw, 11px)", lineHeight: 1.5 }}>{block.text}</p>
-  );
+  return <p style={{ fontSize: pt(12.5), color: SLATE, lineHeight: 1.3 }}>{block.text}</p>;
 }
 
 // ---------------------------------------------------------------------

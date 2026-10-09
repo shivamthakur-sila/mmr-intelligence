@@ -113,20 +113,48 @@ export function axisDecimals(axis: Axis): number {
   return decimalsNeeded([axis.min, axis.step, axis.max]);
 }
 
-/** Excel/PowerPoint number format with thousands separators and `dp` decimals. */
+/**
+ * Excel/PowerPoint number format with Indian digit grouping (10,03,500) and
+ * `dp` decimals, the way SILA's clients read figures. Excel has no grouping
+ * code for lakhs and crores, so magnitude conditions pick the comma pattern;
+ * the last section covers everything under a lakh, where both systems agree.
+ */
 export function numberFormatCode(dp: number): string {
-  return dp > 0 ? `#,##0.${"0".repeat(dp)}` : "#,##0";
+  const d = dp > 0 ? `.${"0".repeat(dp)}` : "";
+  return `[>=10000000]##\\,##\\,##\\,##0${d};[>=100000]##\\,##\\,##0${d};#,##0${d}`;
 }
 
 /**
- * The same number as numberFormatCode would show it, for the preview.
- *
- * Western grouping, to match what PowerPoint draws from "#,##0". The preview
- * used Indian grouping (14,48,000) while the deck showed 1,448,000; the two
- * have to read identically.
+ * The same number as numberFormatCode would show it, for the preview. Both
+ * must read identically: the submitter approves the preview.
  */
 export function formatNumber(v: number, dp: number): string {
-  return v.toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  return v.toLocaleString("en-IN", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+}
+
+/** A run of digits as Indian grouping: 1003500 -> 10,03,500. Decimals kept. */
+function groupIndian(digits: string, decimals = ""): string {
+  const last3 = digits.slice(-3);
+  const rest = digits.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ",");
+  return (rest ? `${rest},${last3}` : last3) + decimals;
+}
+
+/**
+ * Regroups the large figures in a piece of display text the Indian way:
+ * "1003500" and "1,003,500" both become "10,03,500". Only figures of five
+ * digits or more change - a year or a four-digit count reads the same either
+ * way and is left as typed. Display only: the figures themselves, and what
+ * the grounding check compares, are untouched.
+ */
+export function indianFigures(text: string): string {
+  return text.replace(
+    /(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d{5,})(\.\d+)?(?![\d,])/g,
+    (_, whole: string, dec: string | undefined) => {
+      const digits = whole.replace(/,/g, "");
+      if (digits.length < 5 || /^0/.test(digits)) return whole + (dec ?? "");
+      return groupIndian(digits, dec ?? "");
+    }
+  );
 }
 
 /** A round step from the 1-2-5 ladder, aiming for about `target` intervals. */

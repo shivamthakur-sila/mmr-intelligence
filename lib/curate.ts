@@ -102,7 +102,7 @@ IMPORTANT — what to include: build the deck ONLY from parameters that have gen
 Chart what can be charted. Wherever a section's figures form a series — across months, across locations, across categories, or as parts of one total — give that section a chart block. A section of real series data shown only as a table reads as a data dump rather than a report. Chart only from data you have in full: a sheet ending "${CUT_SHORT}" has been cut short, so never count or total it.
 
 Each section becomes one slide, holding several blocks stacked in order:
-- {"type":"table","headers":[...],"rows":[[...]]} — real headers and rows exactly as in the source. At most 10 rows so it fits; if the source has more, choose the most representative and add a "note" block saying the table shows a selection. Give the source's total number of rows only where the source itself states it. Leave out any column that is empty in every row you show. A table has no "note" field - a caveat is always its own note block.
+- {"type":"table","headers":[...],"rows":[[...]]} — real headers and rows exactly as in the source. Include every row the source gives for this month - the renderer draws long tables compact and continues them onto further slides, so never cut a table to a selection. Leave out any column that is empty in every row. A table has no "note" field - a caveat is always its own note block.
 - {"type":"table","headers":[...],"rows":[[...]],"groups":[{"label":"Housekeeping","afterRow":0},{"label":"Technical","afterRow":5}]} — a table with category band rows. Use whenever rows fall into natural groups (service line, location, floor); grouped tables read far better than flat ones.
 - {"type":"narrative","text":"..."} — 1-4 sentences, only what the source states.
 - {"type":"bullets","items":["..."]} — 2-6 short points.
@@ -127,8 +127,22 @@ Respond with ONLY valid JSON, no fences:
 Every section you include must have at least one block.`;
 }
 
+// Fields marked "layout" are set by lib/deck-layout.ts or the sanitisers,
+// never taken from the model: sanitiseBlocks rebuilds every block from the
+// fields the prompt asks for.
 export type Block =
-  | { type: "table"; headers: string[]; rows: string[][]; groups?: { label: string; afterRow: number }[] }
+  | {
+      type: "table";
+      headers: string[];
+      rows: string[][];
+      groups?: { label: string; afterRow: number }[];
+      /** layout: drawn at the compact size because the table is long. */
+      dense?: boolean;
+      /** layout: drawn large because it is short and has the slide to itself. */
+      roomy?: boolean;
+      /** layout: a short note drawn in small type directly under the table. */
+      footnote?: string;
+    }
   | { type: "narrative"; text: string }
   | { type: "bullets"; items: string[] }
   | { type: "kpis"; items: { label: string; value: string }[] }
@@ -139,8 +153,15 @@ export type Block =
       categories: string[];
       series: { name: string; values: number[] }[];
       unit?: string;
+      /** layout: a short note drawn in small type directly under the chart. */
+      footnote?: string;
     }
-  | { type: "photos"; imageIds: string[] }
+  | {
+      type: "photos";
+      imageIds: string[];
+      /** layout: median width / height of the chosen photos, which shapes the tiles. */
+      aspect?: number;
+    }
   | { type: "note"; text: string };
 
 export type CuratedSection = { key: string; label: string; blocks: Block[] };
@@ -418,6 +439,19 @@ function sanitiseChart(block: Extract<Block, { type: "chart" }>, key: string, ou
     if (bad !== -1) return asTable(`series "${s?.name}" value ${JSON.stringify(s.values[bad])} is not a number`);
     clean.push({ name: String(s.name ?? ""), values: values as number[] });
   }
+  // A pie of more than six slices is unreadable - slivers whose labels crowd
+  // together. It is drawn as a horizontal bar chart sorted largest first:
+  // the same figures, read by length.
+  if (block.chartType === "pie" && cats.length > 6) {
+    const order = cats.map((_, i) => i).sort((a, b) => clean[0].values[b] - clean[0].values[a]);
+    out.push({
+      type: "chart", chartType: "bar", title,
+      categories: order.map((i) => cats[i]),
+      series: [{ name: clean[0].name, values: order.map((i) => clean[0].values[i]) }],
+      unit: unit || undefined,
+    });
+    return;
+  }
   out.push({ type: "chart", chartType: block.chartType, title, categories: cats, series: clean, unit: unit || undefined });
 }
 
@@ -430,21 +464,33 @@ function sanitiseChart(block: Extract<Block, { type: "chart" }>, key: string, ou
  * the preview drew a tile for each, so the submitter approved a photo grid
  * that came out smaller in the filed deck. Checked once here, both agree.
  */
-export function sanitisePhotos(deck: CuratedDeck, knownIds: string[]): CuratedDeck {
-  const known = new Set(knownIds);
+export function sanitisePhotos(
+  deck: CuratedDeck,
+  photos: { id: string; width?: number; height?: number }[]
+): CuratedDeck {
+  const byId = new Map(photos.map((p) => [p.id, p]));
   const sections = deck.sections
     .map((section) => ({
       ...section,
       blocks: section.blocks.flatMap((b): Block[] => {
         if (b.type !== "photos") return [b];
-        const ids = [...new Set((Array.isArray(b.imageIds) ? b.imageIds : []).filter((id) => known.has(id)))].slice(0, 6);
+        const ids = [...new Set((Array.isArray(b.imageIds) ? b.imageIds : []).filter((id) => byId.has(id)))].slice(0, 6);
         const dropped = (b.imageIds ?? []).length - ids.length;
         if (dropped > 0) console.warn(`[curate] photos in "${section.key}": ${dropped} id(s) unknown, repeated or over six`);
-        return ids.length > 0 ? [{ ...b, imageIds: ids }] : [];
+        if (ids.length === 0) return [];
+        // The grid's tiles take the shape of its photos: most site photos
+        // are portrait phone shots, and a landscape tile kept 28% of one.
+        const aspects = ids
+          .map((id) => byId.get(id)!)
+          .filter((p) => p.width && p.height)
+          .map((p) => p.width! / p.height!)
+          .sort((x, y) => x - y);
+        const aspect = aspects.length > 0 ? aspects[Math.floor((aspects.length - 1) / 2)] : undefined;
+        return [{ type: "photos", imageIds: ids, ...(aspect ? { aspect } : {}) }];
       }),
     }))
     .filter((s) => s.blocks.length > 0);
-  const coverImageId = deck.coverImageId && known.has(deck.coverImageId) ? deck.coverImageId : undefined;
+  const coverImageId = deck.coverImageId && byId.has(deck.coverImageId) ? deck.coverImageId : undefined;
   return { ...deck, coverImageId, sections };
 }
 
