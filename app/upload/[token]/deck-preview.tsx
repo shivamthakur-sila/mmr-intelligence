@@ -589,7 +589,11 @@ function PieChart({ categories, values, dp }: { categories: string[]; values: nu
         const mid = (a0 + a1) / 2;
         return (
           <g key={i}>
-            {whole ? <circle cx={cx} cy={cy} r={r} fill={colors[i]} /> : <path d={arc(a0, a1)} fill={colors[i]} />}
+            {whole ? (
+              <circle cx={cx} cy={cy} r={r} fill={colors[i]} />
+            ) : (
+              <path d={arc(a0, a1)} fill={colors[i]} stroke="#FFFFFF" strokeWidth={0.6} />
+            )}
             {v / total > 0.03 && (
               <text
                 x={whole ? cx : cx + 36 * Math.cos(mid)}

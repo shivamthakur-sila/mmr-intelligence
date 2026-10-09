@@ -24,9 +24,49 @@ export function tint(hex: string, amount: number): string {
     .toUpperCase();
 }
 
+/** Mixes a hex colour (no #) toward black. 0 returns it unchanged. */
+export function shade(hex: string, amount: number): string {
+  const n = parseInt(hex, 16);
+  const mix = (c: number) => Math.round(c * (1 - amount));
+  return [mix((n >> 16) & 255), mix((n >> 8) & 255), mix(n & 255)]
+    .map((v) => v.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+}
+
+const CHARCOAL = "3C3C3B";
+
 /**
- * Exactly `n` distinct brand colours (hex, no #), alternating the two brand
- * hues and stepping through tints, so adjacent entries never collide.
+ * Twelve colours for the 12-category ceiling the curation sanitiser enforces,
+ * led by the two brand hues and built only from them and a neutral grey.
+ *
+ * Chosen by measured perceptual distance, not by being different hex codes.
+ * Tints of two hues alone cannot make twelve colours a reader can tell apart:
+ * the previous steps gave a 10-slice pie two oranges 4 apart in CIEDE2000
+ * (Plumbing and Fire Safety read as one colour on the rendered legend) and two
+ * near-white slices that vanished against the slide. Darker shades and a grey
+ * add the separation. Every pair below is at least 10.8 apart and every
+ * colour at least 15 from white; the first four are at least 12 apart, so a
+ * small chart gets the most distinct colours. Searched greedily from a fixed
+ * brand-led start, then checked by rendering a 12-slice pie.
+ */
+const PALETTE = [
+  FM_BLUE,
+  SUNSHINE,
+  tint(FM_BLUE, 0.55), // 9DAABF
+  tint(CHARCOAL, 0.45), // 949493
+  shade(SUNSHINE, 0.45), // 885A16
+  tint(SUNSHINE, 0.7), // FDE3BF
+  tint(CHARCOAL, 0.15), // 595958
+  tint(FM_BLUE, 0.25), // 5C7194
+  shade(SUNSHINE, 0.25), // B97A1E
+  tint(CHARCOAL, 0.65), // BBBBBA
+  shade(FM_BLUE, 0.45), // 15243E
+  tint(SUNSHINE, 0.4), // FAC87E
+];
+
+/**
+ * Exactly `n` brand colours (hex, no #), one per data point.
  *
  * The LENGTH is the point, not just the hues. pptxgenjs colours pie slices -
  * and the bars of a single-series bar chart - per data point, and once the
@@ -34,30 +74,22 @@ export function tint(hex: string, amount: number): string {
  * `chartColors[Math.floor(Math.random() * chartColors.length)]`
  * (dist/pptxgen.cjs.js, the `<c:dPt>` branches). Verified by generating the
  * same five-slice pie six times against a two-colour palette and getting six
- * different colour assignments. Always pass one colour per point.
- *
- * Six tint steps cover the 12-category ceiling the curation sanitiser enforces. With
- * four, the ninth colour repeated the first, so a 9-12 slice pie had two
- * slices - and two legend entries - in the same blue. The steps are spaced
- * widely because small ones do not separate: at 0.21 a third series came out
- * a slate blue that preflight flagged as reading like the first.
+ * different colour assignments. Always pass one colour per point. Past twelve
+ * - which the sanitiser never lets through - the list repeats.
  */
-const STEPS = [0, 0.55, 0.3, 0.75, 0.15, 0.88];
-
 export function chartPalette(n: number): string[] {
-  const bases = [FM_BLUE, SUNSHINE];
-  return Array.from({ length: Math.max(1, n) }, (_, i) =>
-    tint(bases[i % bases.length], STEPS[Math.floor(i / bases.length) % STEPS.length])
-  );
+  return Array.from({ length: Math.max(1, n) }, (_, i) => PALETTE[i % PALETTE.length]);
 }
 
 /**
- * Decimal places needed to show every value exactly, capped at 3.
+ * Decimal places needed to show every value exactly, up to 6.
  *
  * The format used to be hard-coded "#,##0", which rounds: 12.5 was charted and
  * labelled as 13, a figure that is not in the source - the one thing this
- * system must never do. Values are normalised through toPrecision first, so
- * spreadsheet float noise (528.0000000000007) counts as 528, not as 13 places.
+ * system must never do. A cap of 3 did the same to a power factor of 0.9995,
+ * drawn as unity, "1.000". Values are normalised through toPrecision first,
+ * so spreadsheet float noise (528.0000000000007) counts as 528, not as 13
+ * places; the cap only stops a value like 46890.41095890411 filling a label.
  */
 export function decimalsNeeded(values: number[]): number {
   let dp = 0;
@@ -67,7 +99,18 @@ export function decimalsNeeded(values: number[]): number {
     const frac = clean.includes("e") ? "" : clean.split(".")[1] ?? "";
     dp = Math.max(dp, frac.length);
   }
-  return Math.min(3, dp);
+  return Math.min(6, dp);
+}
+
+/**
+ * Decimal places for a value axis's labels: enough to tell every gridline
+ * from its neighbours. Taken from the step, not the data. With the data's
+ * places, gridlines 0.0005 apart were all labelled to 3 places, so an axis
+ * read 0.995, 0.995, 0.996, 0.996, 0.997 - duplicate labels, and a top label
+ * that is not a figure anybody submitted.
+ */
+export function axisDecimals(axis: Axis): number {
+  return decimalsNeeded([axis.min, axis.step, axis.max]);
 }
 
 /** Excel/PowerPoint number format with thousands separators and `dp` decimals. */
@@ -130,7 +173,10 @@ export function niceAxis(values: number[], opts: { includeZero?: boolean; pad?: 
   if (hi <= 0 && rawMax > 0) rawMax = 0;
   if (rawMax <= rawMin) rawMax = rawMin + 1;
 
-  const step = niceStep(rawMax - rawMin);
+  // Counts are whole numbers, so their gridlines are too: incidents of
+  // [0, 1, 0] read oddly against an axis of 0.5 and 1.5.
+  const whole = finite.length > 0 && finite.every((v) => Number.isInteger(v));
+  const step = whole ? Math.max(1, niceStep(rawMax - rawMin)) : niceStep(rawMax - rawMin);
   return {
     min: Math.floor(rawMin / step + 1e-9) * step,
     max: Math.ceil(rawMax / step - 1e-9) * step,

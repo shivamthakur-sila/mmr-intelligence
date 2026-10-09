@@ -108,9 +108,22 @@ const CELL_MARGIN_X = 0.2;
 const BODY_CHARS_PER_IN = 12;
 const HEADER_CHARS_PER_IN = 11;
 
-/** Lines a cell's text wraps to at `perLine` characters, breaking on spaces. */
+/**
+ * Lines a piece of text wraps to at `perLine` characters. A hard line break
+ * starts a new line wherever it falls - an Excel cell typed with Alt+Enter
+ * keeps its breaks all the way to the slide - so each paragraph is wrapped on
+ * its own and the lines summed. Counting a break as a space costed a
+ * three-line cell as one line, and the table ran off the slide.
+ */
 function wrappedLines(text: string, perLine: number): number {
-  const words = String(text ?? "").split(/\s+/).filter(Boolean);
+  return String(text ?? "")
+    .split(/\r\n|\r|\n|\v/)
+    .reduce((n, para) => n + paragraphLines(para, perLine), 0);
+}
+
+/** Lines one paragraph wraps to at `perLine` characters, breaking on spaces. */
+function paragraphLines(text: string, perLine: number): number {
+  const words = text.split(/\s+/).filter(Boolean);
   if (words.length === 0) return 1;
   let lines = 1;
   let used = 0;
@@ -139,6 +152,30 @@ function tableRowHeight(cells: string[], width: number, cols: number, header: bo
   const perLine = Math.max(4, Math.floor(usable * (header ? HEADER_CHARS_PER_IN : BODY_CHARS_PER_IN)));
   const lines = Math.max(1, ...cells.map((c) => wrappedLines(String(c ?? ""), perLine)));
   return 0.06 + lines * 0.22;
+}
+
+/** A category band spans every column, in bold, and wraps like any cell. */
+function bandHeight(label: string, width: number): number {
+  return tableRowHeight([label], width, 1, true);
+}
+
+// Body text, as generate-deck draws it: narrative at 12.5pt, bullets at 12pt,
+// notes at 10pt. Characters to the inch err narrow, as for tables.
+const NARRATIVE_CHARS_PER_IN = 11;
+const NARRATIVE_LINE_H = 0.3;
+const BULLET_CHARS_PER_IN = 11;
+const BULLET_LINE_H = 0.2;
+const BULLET_ITEM_H = 0.32;
+const NOTE_CHARS_PER_IN = 14;
+
+function narrativeHeight(text: string, width: number): number {
+  return Math.max(0.5, wrappedLines(text, Math.floor(width * NARRATIVE_CHARS_PER_IN)) * NARRATIVE_LINE_H);
+}
+
+function bulletHeight(item: string, width: number): number {
+  // The bullet glyph and its indent take about 0.4in of the line.
+  const lines = wrappedLines(item, Math.floor((width - 0.4) * BULLET_CHARS_PER_IN));
+  return BULLET_ITEM_H + (lines - 1) * BULLET_LINE_H;
 }
 
 /**
@@ -176,24 +213,28 @@ export function blockHeight(b: Block, width = CONTENT_W): number {
       return 1.15;
     case "table": {
       const cols = Math.max(1, b.headers.length);
-      const bands = (b.groups?.length ?? 0) * 0.28;
+      const bands = (b.groups ?? []).reduce((sum, g) => sum + bandHeight(g.label, width), 0);
       return (
         b.rows.reduce((sum, r) => sum + tableRowHeight(r, width, cols, false), tableRowHeight(b.headers, width, cols, true)) +
         bands
       );
     }
     case "narrative":
-      return Math.max(0.5, Math.ceil(b.text.length / 135) * 0.3);
+      return narrativeHeight(b.text, width);
     case "bullets":
-      return b.items.length * 0.32;
+      return b.items.reduce((sum, item) => sum + bulletHeight(item, width), 0);
     case "photos":
     case "chart":
       // Photo grids and charts flex to whatever vertical space remains rather
       // than claiming a fixed height. A fixed estimate meant a six-photo grid
       // could be judged "too tall to fit" and silently dropped.
       return 0;
-    case "note":
-      return 0.44;
+    case "note": {
+      // Two lines fit the standard box; a longer caveat gets a taller one
+      // rather than spilling out of its outline.
+      const lines = wrappedLines(b.text, Math.floor((width - 0.32) * NOTE_CHARS_PER_IN));
+      return Math.max(0.44, 0.12 + lines * 0.17);
+    }
   }
 }
 
@@ -284,7 +325,7 @@ function chunkTable(b: Extract<Block, { type: "table" }>): Block[] {
     let used = headerH;
     let end = start;
     while (end < b.rows.length) {
-      const bands = groups.filter((g) => g.afterRow === end).length * 0.28;
+      const bands = groups.filter((g) => g.afterRow === end).reduce((sum, g) => sum + bandHeight(g.label, CONTENT_W), 0);
       const h = tableRowHeight(b.rows[end], CONTENT_W, cols, false) + bands;
       if (end > start && used + h > CONTENT_H) break;
       used += h;
@@ -294,13 +335,54 @@ function chunkTable(b: Extract<Block, { type: "table" }>): Block[] {
       type: "table",
       headers: b.headers,
       rows: b.rows.slice(start, end),
+      // A band after the last row heads nothing, but renderTable draws it at
+      // the end rather than losing it, so it travels with the last chunk.
       groups: groups
-        .filter((g) => g.afterRow >= start && g.afterRow < end)
-        .map((g) => ({ label: g.label, afterRow: g.afterRow - start })),
+        .filter((g) => g.afterRow >= start && (g.afterRow < end || (end === b.rows.length && g.afterRow >= end)))
+        .map((g) => ({ label: g.label, afterRow: Math.min(g.afterRow, end) - start })),
     });
     start = end;
   }
   return chunks;
+}
+
+/**
+ * Greedily packs `parts` into runs whose height, by `height`, fits a slide.
+ * A part too tall on its own still gets a run to itself; nothing is dropped.
+ */
+function pack<T>(parts: T[], height: (run: T[]) => number): T[][] {
+  const runs: T[][] = [];
+  let run: T[] = [];
+  for (const p of parts) {
+    if (run.length > 0 && height([...run, p]) > CONTENT_H) {
+      runs.push(run);
+      run = [];
+    }
+    run.push(p);
+  }
+  if (run.length > 0) runs.push(run);
+  return runs;
+}
+
+/**
+ * Cuts a bullet list or a narrative taller than a slide into slide-sized
+ * blocks, as chunkTable does for tables. A narrative breaks between sentences,
+ * and inside a sentence only if one sentence alone is too tall. Both used to
+ * be taken whole and drawn on past the bottom edge, their last lines lost.
+ */
+function chunkText(b: Extract<Block, { type: "bullets" | "narrative" }>): Block[] {
+  if (blockHeight(b) <= CONTENT_H + FIT_TOLERANCE) return [b];
+  if (b.type === "bullets") {
+    return pack(b.items, (items) => blockHeight({ type: "bullets", items })).map((items) => ({ type: "bullets", items }));
+  }
+  const fits = (text: string) => narrativeHeight(text, CONTENT_W) <= CONTENT_H;
+  const pieces = b.text
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((sentence) => (fits(sentence) ? [sentence] : sentence.split(/\s+/)));
+  return pack(pieces, (run) => narrativeHeight(run.join(" "), CONTENT_W)).map((run) => ({
+    type: "narrative",
+    text: run.join(" "),
+  }));
 }
 
 /**
@@ -324,7 +406,7 @@ export function splitRows(rows: Row[]): { take: Row[]; rest: Row[] } {
     used += gap + h;
   }
 
-  // Always take one. chunkTable has already cut any table that could not fit
+  // Always take one. chunkTable and chunkText have already cut any block that could not fit
   // a slide on its own, so this only guards against a loop.
   if (take.length === 0) take.push(rows[0]);
   return { take, rest: rows.slice(take.length) };
@@ -334,7 +416,9 @@ export function splitRows(rows: Row[]): { take: Row[]; rest: Row[] } {
 export function sectionSlides<T extends { label: string; blocks: Block[] }>(
   section: T
 ): { label: string; rows: Row[] }[] {
-  const blocks = section.blocks.flatMap((b) => (b.type === "table" ? chunkTable(b) : [b]));
+  const blocks = section.blocks.flatMap((b) =>
+    b.type === "table" ? chunkTable(b) : b.type === "bullets" || b.type === "narrative" ? chunkText(b) : [b]
+  );
   const out: { label: string; rows: Row[] }[] = [];
   let remaining = planRows(blocks);
   while (remaining.length > 0) {

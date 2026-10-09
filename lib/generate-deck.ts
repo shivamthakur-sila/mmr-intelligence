@@ -4,7 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import type { CuratedDeck, Block } from "./curate";
-import { chartPalette, decimalsNeeded, niceAxis, numberFormatCode } from "./chart-style";
+import { axisDecimals, chartPalette, decimalsNeeded, niceAxis, numberFormatCode } from "./chart-style";
 import {
   BLOCK_SPACING,
   CHART_MAX_H,
@@ -177,7 +177,7 @@ function renderChart(
   // 13 on both the axis and the data labels - a figure that is not in the
   // source, which is the one thing this system must never print.
   const valueFormat = numberFormatCode(decimalsNeeded(all));
-  const unit = b.unit?.trim() || "";
+  const unit = typeof b.unit === "string" ? b.unit.trim() : "";
 
   const common = {
     x,
@@ -226,6 +226,9 @@ function renderChart(
         title: b.title ? (unit ? `${b.title} (${unit})` : b.title) : unit,
         // One colour per slice — see chartPalette.
         chartColors: chartPalette(cats.length),
+        // A white edge between slices, so two neighbouring pale slices
+        // still read as two.
+        dataBorder: { pt: 1, color: "FFFFFF" },
         showLegend: true,
         legendPos: "r",
         showValue: !compact,
@@ -263,7 +266,7 @@ function renderChart(
         // Gridlines on the axis's own round step. Left to the engine they fell
         // on half-units of the data, so points read half a unit high.
         valAxisMajorUnit: axis.step,
-        valAxisLabelFormatCode: numberFormatCode(decimalsNeeded([axis.min, axis.step])),
+        valAxisLabelFormatCode: numberFormatCode(axisDecimals(axis)),
         showValAxisTitle: !!unit,
         valAxisTitle: unit,
         valAxisTitleColor: MUTED,
@@ -315,7 +318,7 @@ function renderChart(
     valAxisMinVal: axis.min,
     valAxisMaxVal: axis.max,
     valAxisMajorUnit: axis.step,
-    valAxisLabelFormatCode: numberFormatCode(decimalsNeeded([axis.min, axis.step])),
+    valAxisLabelFormatCode: numberFormatCode(axisDecimals(axis)),
     showValAxisTitle: !!unit,
     valAxisTitle: unit,
     valAxisTitleColor: MUTED,

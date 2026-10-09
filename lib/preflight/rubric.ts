@@ -49,9 +49,10 @@ C7. Tables: header row is filled blue with white text; no column is so narrow
 
 PALETTE AND TYPE
 P1. Only brand colour appears: FM Blue #264170, Sunshine #F7A328, Seashell
-    Grey #D9D9D9, white, near-black text, light grey rules — plus lightened
-    tints of FM Blue and Sunshine, which are sanctioned and are how a chart of
-    three or more series is coloured. A tint is not a fault; judge whether
+    Grey #D9D9D9, white, near-black text, light grey rules — plus lighter
+    tints and darker shades of FM Blue and Sunshine, and neutral greys, which
+    are sanctioned and are how a chart of three or more series or slices is
+    coloured. A tint, shade or grey is not a fault; judge whether
     neighbouring series are TELLABLE APART, not whether the colour is one of
     the two base hues. Do flag genuinely foreign colour: a default Office
     blue/orange/grey/yellow chart palette, a dark grey chart background, a
